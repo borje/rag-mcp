@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Hybrid RAG MCP server — offline, fastembed ONNX embeddings, no cloud."""
+import json
 import os
 from pathlib import Path
 
@@ -117,9 +118,9 @@ def search(query: str, n_results: int = 8) -> list[SearchResult]:
 
 
 @mcp.tool()
-def list_sources() -> list[str]:
+def list_sources() -> str:
     """List all ingested document source paths."""
-    return store.list_sources()
+    return json.dumps(store.list_sources())
 
 
 @mcp.tool()
