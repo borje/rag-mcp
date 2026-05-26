@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
 
 from chunkers import chunk_file
 from store import RAGStore
@@ -14,6 +15,33 @@ mcp = FastMCP(
     host=os.environ.get("FASTMCP_HOST", "127.0.0.1"),
     port=int(os.environ.get("FASTMCP_PORT", "8000")),
 )
+
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
+FILES_ROOT = Path(os.environ.get("FILES_ROOT", "/data"))
+
+
+def _file_url(source: str) -> str | None:
+    try:
+        rel = Path(source).relative_to(FILES_ROOT)
+        return f"{BASE_URL}/files/{rel}"
+    except ValueError:
+        return None
+
+
+class SearchResult(BaseModel):
+    title: str
+    doc_title: str | None
+    chunk_type: str | None
+    file_url: str | None
+    score: float
+    body: str
+
+
+class StoreStatus(BaseModel):
+    total_chunks: int
+    total_sources: int
+    model: str
+    store_dir: str
 
 
 @mcp.tool()
@@ -59,22 +87,22 @@ def ingest_directory(directory: str, glob: str = "**/*") -> str:
 
 
 @mcp.tool()
-def search(query: str, n_results: int = 8) -> str:
+def search(query: str, n_results: int = 8) -> list[SearchResult]:
     """Hybrid vector + BM25 search over ingested documents.
-    Returns the top matching chunks with source paths and relevance scores.
+    Returns a JSON array; each item includes file_url for direct download of the source file.
     """
     results = store.search(query, n=n_results)
-    if not results:
-        return "No results. Use ingest_file or ingest_directory to add documents first."
-
-    parts = []
-    for r in results:
-        parts.append(
-            f"## {r['title']}\n"
-            f"Source: {r['source']}  |  Score: {r['score']:.4f}\n\n"
-            f"{r['body']}"
+    return [
+        SearchResult(
+            title=r["title"],
+            doc_title=r.get("doc_title"),
+            chunk_type=r.get("chunk_type"),
+            file_url=_file_url(r["source"]),
+            score=r["score"],
+            body=r["body"],
         )
-    return "\n\n---\n\n".join(parts)
+        for r in results
+    ]
 
 
 @mcp.tool()
@@ -96,16 +124,27 @@ def delete_source(source: str) -> str:
 
 
 @mcp.tool()
-def rag_status() -> str:
+def rag_status() -> StoreStatus:
     """Show store statistics: chunk count, source count, model, storage path."""
-    s = store.stats()
-    return (
-        f"Chunks: {s['total_chunks']}\n"
-        f"Sources: {s['total_sources']}\n"
-        f"Embedding model: {s['model']}\n"
-        f"Store path: {s['store_dir']}"
-    )
+    return StoreStatus(**store.stats())
 
 
 if __name__ == "__main__":
-    mcp.run(transport=os.environ.get("MCP_TRANSPORT", "stdio"))
+    import uvicorn
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("FASTMCP_PORT", "8000"))
+
+    if transport == "sse":
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+        from starlette.staticfiles import StaticFiles
+
+        FILES_ROOT.mkdir(parents=True, exist_ok=True)
+        app = Starlette(routes=[
+            Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
+            Mount("/", app=mcp.sse_app()),
+        ])
+        uvicorn.run(app, host=host, port=port)
+    else:
+        mcp.run(transport=transport)

@@ -5,6 +5,11 @@ services:
       - "8000:8000"
     volumes:
       - rag-data:/data
+    environment:
+      # BASE_URL must be the externally-accessible URL — callers outside Docker
+      # cannot reach localhost:8000 inside the container. Override for production.
+      - BASE_URL=http://localhost:8000
+      - FILES_ROOT=/data
 
 volumes:
   rag-data:
