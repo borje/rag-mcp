@@ -19,7 +19,7 @@ COPY server.py store.py chunkers.py /app/
 
 VOLUME /data
 
-ENV RAG_MCP_DATA=/data
+ENV RAG_MCP_DATA=/data/.store
 ENV FASTEMBED_CACHE_PATH=/app/models
 ENV MCP_TRANSPORT=sse
 ENV FASTMCP_HOST=0.0.0.0

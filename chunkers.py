@@ -172,6 +172,9 @@ _EXT_MAP = {
 }
 
 
+_MIN_CHUNK_BODY = 80
+
+
 def chunk_file(path: Path) -> list[dict]:
     path = Path(path)
     ext = path.suffix.lower()
@@ -180,10 +183,13 @@ def chunk_file(path: Path) -> list[dict]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if "paths" in data and isinstance(data["paths"], dict):
-                return list(chunk_openapi(path))
+                raw = list(chunk_openapi(path))
+            else:
+                raw = list(chunk_text(path))
         except Exception:
-            pass
-        return list(chunk_text(path))
+            raw = list(chunk_text(path))
+    else:
+        fn = _EXT_MAP.get(ext)
+        raw = list(fn(path)) if fn else []
 
-    fn = _EXT_MAP.get(ext)
-    return list(fn(path)) if fn else []
+    return [c for c in raw if len(c.get("body", "")) >= _MIN_CHUNK_BODY]
