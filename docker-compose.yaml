@@ -1,0 +1,10 @@
+services:
+  rag-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - rag-data:/data
+
+volumes:
+  rag-data:

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "rag-mcp": {
+      "type": "stdio",
+      "command": "/home/bo-grn/dev/rag-mcp/.venv-build/bin/python",
+      "args": ["/home/bo-grn/dev/rag-mcp/server.py"],
+      "env": {
+        "FASTEMBED_CACHE_PATH": "/home/bo-grn/dev/rag-mcp/transfer/models",
+        "RAG_MCP_DATA": "/home/bo-grn/.local/share/rag-mcp"
+      }
+    }
+  }
+}
