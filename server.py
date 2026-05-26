@@ -106,12 +106,9 @@ def search(query: str, n_results: int = 8) -> list[SearchResult]:
 
 
 @mcp.tool()
-def list_sources() -> str:
+def list_sources() -> list[str]:
     """List all ingested document source paths."""
-    sources = store.list_sources()
-    if not sources:
-        return "No documents ingested yet."
-    return "\n".join(sources)
+    return store.list_sources()
 
 
 @mcp.tool()
