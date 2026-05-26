@@ -44,6 +44,17 @@ class StoreStatus(BaseModel):
     store_dir: str
 
 
+class FileIngestResult(BaseModel):
+    file: str
+    chunks: int
+
+
+class DirectoryIngestResult(BaseModel):
+    total_chunks: int
+    total_files: int
+    files: list[FileIngestResult]
+
+
 @mcp.tool()
 def ingest_file(path: str) -> str:
     """Ingest a file into the RAG store.
@@ -62,28 +73,28 @@ def ingest_file(path: str) -> str:
 
 
 @mcp.tool()
-def ingest_directory(directory: str, glob: str = "**/*") -> str:
+def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResult:
     """Ingest all supported files in a directory tree.
     glob defaults to '**/*' (recursive). Example: '*.yaml' for top-level only.
     """
     d = Path(directory).expanduser().resolve()
     if not d.is_dir():
-        return f"Error: not a directory: {directory}"
+        raise ValueError(f"Not a directory: {directory}")
 
     supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
-    total = 0
-    lines: list[str] = []
+    files: list[FileIngestResult] = []
     for f in sorted(d.glob(glob)):
         if f.is_file() and f.suffix.lower() in supported:
             chunks = chunk_file(f)
             if chunks:
                 n = store.ingest(chunks)
-                total += n
-                lines.append(f"  {f.name}: {n} chunks")
+                files.append(FileIngestResult(file=f.name, chunks=n))
 
-    if not lines:
-        return f"No supported files found in {directory}"
-    return f"Ingested {total} chunks from {len(lines)} files:\n" + "\n".join(lines)
+    return DirectoryIngestResult(
+        total_chunks=sum(r.chunks for r in files),
+        total_files=len(files),
+        files=files,
+    )
 
 
 @mcp.tool()
