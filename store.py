@@ -55,15 +55,19 @@ class RAGStore:
     def _embed(self, texts: list[str]) -> np.ndarray:
         return np.array(list(self.model.embed(texts)), dtype=np.float32)
 
-    def ingest(self, chunks: list[dict]) -> int:
+    def ingest(self, chunks: list[dict], batch_size: int = 64) -> int:
         if not chunks:
             return 0
-        new_vecs = self._embed([c["body"] for c in chunks])
-        self._chunks.extend(chunks)
-        self._vectors = new_vecs if self._vectors is None else np.vstack([self._vectors, new_vecs])
+        total = 0
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            new_vecs = self._embed([c["body"] for c in batch])
+            self._chunks.extend(batch)
+            self._vectors = new_vecs if self._vectors is None else np.vstack([self._vectors, new_vecs])
+            total += len(batch)
+            self._save()
         self._rebuild_bm25()
-        self._save()
-        return len(chunks)
+        return total
 
     def delete_source(self, source: str) -> int:
         if not self._chunks:
