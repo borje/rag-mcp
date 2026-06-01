@@ -66,6 +66,8 @@ def ingest_file(path: str) -> str:
         return f"Error: file not found: {path}"
     if not p.is_file():
         return f"Error: not a file: {path}"
+    if str(p) in store.list_sources():
+        return f"Already ingested: {p.name}"
     chunks = chunk_file(p)
     if not chunks:
         return f"No chunks extracted from {p.name} — unsupported format or empty file"
@@ -84,8 +86,9 @@ def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResul
 
     supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
     files: list[FileIngestResult] = []
+    ingested_sources = set(store.list_sources())
     for f in sorted(d.glob(glob)):
-        if f.is_file() and f.suffix.lower() in supported:
+        if f.is_file() and f.suffix.lower() in supported and str(f) not in ingested_sources:
             chunks = chunk_file(f)
             if chunks:
                 n = store.ingest(chunks)
