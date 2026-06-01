@@ -2,12 +2,17 @@ services:
   rag-mcp:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
-      - ./data:/data
+      #- ./data:/data
+      - /Users/bege/books/algobooks/markdown/kaufman-trading-systems-methods-new:/data
+      - rag-store:/store
     environment:
       # BASE_URL must be the externally-accessible URL — callers outside Docker
       # cannot reach localhost:8000 inside the container. Override for production.
-      - BASE_URL=http://localhost:8000
+      - BASE_URL=http://localhost:8001
       - FILES_ROOT=/data
-      - RAG_MCP_DATA=/data/.store
+      - RAG_MCP_DATA=/store
+
+volumes:
+  rag-store:
