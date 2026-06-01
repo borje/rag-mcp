@@ -11,8 +11,6 @@ services:
       # BASE_URL must be the externally-accessible URL — callers outside Docker
       # cannot reach localhost:8000 inside the container. Override for production.
       - BASE_URL=http://localhost:8001
-      - FILES_ROOT=/data
-      - RAG_MCP_DATA=/store
 
 volumes:
   rag-store:
