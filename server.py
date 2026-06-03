@@ -95,6 +95,16 @@ def _ingest_directory(directory: Path, glob: str = "**/*") -> DirectoryIngestRes
     )
 
 
+def _cleanup_stale_sources() -> list[str]:
+    """Delete store entries whose source files no longer exist. Returns removed paths."""
+    removed = []
+    for s in store.list_sources():
+        if not Path(s).exists():
+            store.delete_source(s)
+            removed.append(s)
+    return removed
+
+
 @mcp.tool()
 def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResult:
     """Ingest all supported files in a directory tree.
@@ -164,14 +174,11 @@ if __name__ == "__main__":
         def _startup_ingest():
             print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
             try:
+                for s in _cleanup_stale_sources():
+                    print(f"[startup] removed stale source {Path(s).name}", flush=True)
+
                 supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
                 ingested_sources = set(store.list_sources())
-
-                removed = [s for s in ingested_sources if not Path(s).exists()]
-                for s in removed:
-                    n = store.delete_source(s)
-                    print(f"[startup] removed stale source {Path(s).name} ({n} chunks)", flush=True)
-
                 pending = [
                     f for f in sorted(FILES_ROOT.glob("**/*"))
                     if f.is_file() and f.suffix.lower() in supported and str(f) not in ingested_sources
