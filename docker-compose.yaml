@@ -4,8 +4,7 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      #- ./data:/data
-      - /Users/bege/books/algobooks/markdown/kaufman-trading-systems-methods-new:/data
+      - ./data:/data
       - rag-store:/store
     environment:
       # BASE_URL must be the externally-accessible URL — callers outside Docker

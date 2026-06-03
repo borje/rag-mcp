@@ -2,6 +2,8 @@
 """Hybrid RAG MCP server — offline, fastembed ONNX embeddings, no cloud."""
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -75,19 +77,12 @@ def ingest_file(path: str) -> str:
     return f"Ingested {n} chunks from {p.name}"
 
 
-@mcp.tool()
-def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResult:
-    """Ingest all supported files in a directory tree.
-    glob defaults to '**/*' (recursive). Example: '*.yaml' for top-level only.
-    """
-    d = Path(directory).expanduser().resolve()
-    if not d.is_dir():
-        raise ValueError(f"Not a directory: {directory}")
-
+def _ingest_directory(directory: Path, glob: str = "**/*") -> DirectoryIngestResult:
+    """Walk a directory, ingesting supported files not already in the store."""
     supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
     files: list[FileIngestResult] = []
     ingested_sources = set(store.list_sources())
-    for f in sorted(d.glob(glob)):
+    for f in sorted(directory.glob(glob)):
         if f.is_file() and f.suffix.lower() in supported and str(f) not in ingested_sources:
             chunks = chunk_file(f)
             if chunks:
@@ -99,6 +94,17 @@ def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResul
         total_files=len(files),
         files=files,
     )
+
+
+@mcp.tool()
+def ingest_directory(directory: str, glob: str = "**/*") -> DirectoryIngestResult:
+    """Ingest all supported files in a directory tree.
+    glob defaults to '**/*' (recursive). Example: '*.yaml' for top-level only.
+    """
+    d = Path(directory).expanduser().resolve()
+    if not d.is_dir():
+        raise ValueError(f"Not a directory: {directory}")
+    return _ingest_directory(d, glob)
 
 
 @mcp.tool()
@@ -153,6 +159,22 @@ if __name__ == "__main__":
         from starlette.staticfiles import StaticFiles
 
         FILES_ROOT.mkdir(parents=True, exist_ok=True)
+
+        # RAGStore is not thread-safe: this background scan mutates the store
+        # while tool calls (search/ingest) may read it. Acceptable for the
+        # typical single-client MCP setup; add a lock if concurrency grows.
+        def _startup_ingest():
+            try:
+                result = _ingest_directory(FILES_ROOT)
+                print(f"[startup] ingested {result.total_chunks} chunks "
+                      f"from {result.total_files} new file(s) in {FILES_ROOT}",
+                      flush=True)
+            except Exception as e:
+                print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
+
+        print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
+        threading.Thread(target=_startup_ingest, daemon=True).start()
+
         app = Starlette(routes=[
             Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
             Mount("/", app=mcp.sse_app()),
