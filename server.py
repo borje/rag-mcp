@@ -3,7 +3,6 @@
 import json
 import os
 import sys
-import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -160,25 +159,25 @@ if __name__ == "__main__":
 
         FILES_ROOT.mkdir(parents=True, exist_ok=True)
 
-        # RAGStore is not thread-safe: this background scan mutates the store
-        # while tool calls (search/ingest) may read it. Acceptable for the
-        # typical single-client MCP setup; add a lock if concurrency grows.
         def _startup_ingest():
+            print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
             try:
                 result = _ingest_directory(FILES_ROOT)
-                print(f"[startup] ingested {result.total_chunks} chunks "
-                      f"from {result.total_files} new file(s) in {FILES_ROOT}",
-                      flush=True)
+                print(
+                    f"[startup] ingested {result.total_chunks} chunks "
+                    f"from {result.total_files} new file(s) in {FILES_ROOT}",
+                    flush=True,
+                )
             except Exception as e:
                 print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
 
-        print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
-        threading.Thread(target=_startup_ingest, daemon=True).start()
-
-        app = Starlette(routes=[
-            Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
-            Mount("/", app=mcp.sse_app()),
-        ])
+        app = Starlette(
+            on_startup=[_startup_ingest],
+            routes=[
+                Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
+                Mount("/", app=mcp.sse_app()),
+            ],
+        )
         uvicorn.run(app, host=host, port=port)
     else:
         mcp.run(transport=transport)
