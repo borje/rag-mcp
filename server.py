@@ -162,12 +162,26 @@ if __name__ == "__main__":
         def _startup_ingest():
             print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
             try:
-                result = _ingest_directory(FILES_ROOT)
-                print(
-                    f"[startup] ingested {result.total_chunks} chunks "
-                    f"from {result.total_files} new file(s) in {FILES_ROOT}",
-                    flush=True,
-                )
+                supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
+                ingested_sources = set(store.list_sources())
+                pending = [
+                    f for f in sorted(FILES_ROOT.glob("**/*"))
+                    if f.is_file() and f.suffix.lower() in supported and str(f) not in ingested_sources
+                ]
+                total = len(pending)
+                if total == 0:
+                    print("[startup] no new documents", flush=True)
+                    return
+                all_chunks = 0
+                for i, f in enumerate(pending, 1):
+                    chunks = chunk_file(f)
+                    if chunks:
+                        n = store.ingest(chunks)
+                        all_chunks += n
+                        print(f"[startup] [{i}/{total}] {f.name} ({n} chunks)", flush=True)
+                    else:
+                        print(f"[startup] [{i}/{total}] {f.name} (skipped — no chunks)", flush=True)
+                print(f"[startup] done — {all_chunks} chunks from {total} file(s)", flush=True)
             except Exception as e:
                 print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
 
