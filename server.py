@@ -153,6 +153,8 @@ if __name__ == "__main__":
     port = int(os.environ.get("FASTMCP_PORT", "8000"))
 
     if transport == "sse":
+        from contextlib import asynccontextmanager
+
         from starlette.applications import Starlette
         from starlette.routing import Mount
         from starlette.staticfiles import StaticFiles
@@ -164,6 +166,12 @@ if __name__ == "__main__":
             try:
                 supported = {".yaml", ".yml", ".json", ".md", ".markdown", ".pdf", ".docx", ".txt", ".rst"}
                 ingested_sources = set(store.list_sources())
+
+                removed = [s for s in ingested_sources if not Path(s).exists()]
+                for s in removed:
+                    n = store.delete_source(s)
+                    print(f"[startup] removed stale source {Path(s).name} ({n} chunks)", flush=True)
+
                 pending = [
                     f for f in sorted(FILES_ROOT.glob("**/*"))
                     if f.is_file() and f.suffix.lower() in supported and str(f) not in ingested_sources
@@ -185,13 +193,24 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
 
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                _startup_ingest()
+            except KeyboardInterrupt:
+                print("[startup] interrupted", flush=True)
+            yield
+
         app = Starlette(
-            on_startup=[_startup_ingest],
+            lifespan=lifespan,
             routes=[
                 Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
                 Mount("/", app=mcp.sse_app()),
             ],
         )
-        uvicorn.run(app, host=host, port=port)
+        try:
+            uvicorn.run(app, host=host, port=port)
+        except (KeyboardInterrupt, SystemExit):
+            pass
     else:
         mcp.run(transport=transport)
