@@ -6,8 +6,10 @@ services:
     volumes:
       - ${DATA_DIR}:/data
       - rag-store:/store
+      - rag-models:/models
     environment:
       - BASE_URL=http://localhost:${EXTERNAL_PORT:-8001}
 
 volumes:
   rag-store:
+  rag-models:

@@ -50,14 +50,16 @@ This means exact-term queries and semantic queries both work well.
 ## Running with Docker (recommended)
 
 ```bash
-# First time: build the offline bundle (requires internet)
-bash prepare-transfer.sh
-
-# Start the server
 docker compose up --build
 ```
 
-The server listens on `EXTERNAL_PORT` (`8001` by default in Docker Compose). Source files placed in `DATA_DIR` are served under `/files/`. The vector store lives in the `rag-store` Docker volume.
+The image build and first embedding model download require internet. The server listens on `EXTERNAL_PORT` (`8001` by default in Docker Compose). Source files placed in `DATA_DIR` are served under `/files/`. The vector store lives in the `rag-store` Docker volume and the model cache lives in `rag-models`.
+
+To build the Docker image fully offline after creating/copying `transfer/`, use:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.offline.yaml build
+```
 
 **Ingest your docs:**
 ```

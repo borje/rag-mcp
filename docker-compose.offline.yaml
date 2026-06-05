@@ -1,0 +1,4 @@
+services:
+  rag-mcp:
+    build:
+      dockerfile: Dockerfile.offline
