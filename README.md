@@ -129,3 +129,4 @@ bash transfer/install.sh
 | `FASTMCP_HOST` | `127.0.0.1` | Bind address (HTTP/SSE modes) |
 | `FASTMCP_PORT` | `8000` | Port (HTTP/SSE modes) |
 | `RAG_MCP_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |
+| `RAG_MCP_WATCH_INTERVAL` | `30` | Seconds between auto-ingest polls (SSE/HTTP only). Set to `0` to disable. |

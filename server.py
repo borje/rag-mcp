@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hybrid RAG MCP server — offline, fastembed ONNX embeddings, no cloud."""
 
+import asyncio
 import json
 import os
 import sys
@@ -21,6 +22,7 @@ mcp = FastMCP(
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
 FILES_ROOT = Path(os.environ.get("FILES_ROOT", "/data"))
+WATCH_INTERVAL = int(os.environ.get("RAG_MCP_WATCH_INTERVAL", "30"))
 
 
 def _file_url(source: str) -> str | None:
@@ -195,12 +197,19 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
 
+        async def _watch_loop(interval: int) -> None:
+            while True:
+                await asyncio.sleep(interval)
+                _startup_ingest()
+
         @asynccontextmanager
         async def lifespan(app):
             try:
                 _startup_ingest()
             except KeyboardInterrupt:
                 print("[startup] interrupted", flush=True)
+            if WATCH_INTERVAL > 0:
+                asyncio.create_task(_watch_loop(WATCH_INTERVAL))
             if transport == "streamable-http":
                 async with mcp_app.router.lifespan_context(mcp_app):
                     yield
