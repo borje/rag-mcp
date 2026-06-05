@@ -65,7 +65,7 @@ fi
 
 echo "==> Copying source..."
 mkdir -p "$OUT_DIR/src"
-cp "$WORK_DIR"/{server.py,chunkers.py,store.py,requirements.txt} "$OUT_DIR/src/"
+cp "$WORK_DIR"/{server.py,chunkers.py,store.py,dashboard.py,requirements.txt} "$OUT_DIR/src/"
 cp "$WORK_DIR/.frozen.txt" "$OUT_DIR/src/requirements.frozen.txt"
 
 echo "==> Writing install.sh..."
