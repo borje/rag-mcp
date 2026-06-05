@@ -57,7 +57,7 @@ bash prepare-transfer.sh
 docker compose up --build
 ```
 
-The server listens on port 8000. Source files placed in `./data/` are served at `http://localhost:8000/files/`. The vector store lives in `./data/.store/`.
+The server listens on `EXTERNAL_PORT` (`8001` by default in Docker Compose). Source files placed in `DATA_DIR` are served under `/files/`. The vector store lives in the `rag-store` Docker volume.
 
 **Ingest your docs:**
 ```
@@ -81,6 +81,7 @@ python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-sma
 
 # Register with Claude Code
 claude mcp add rag-mcp \
+  -e MCP_TRANSPORT=stdio \
   -e FASTEMBED_CACHE_PATH="$HOME/.local/share/rag-mcp/models" \
   -- python server.py
 ```
@@ -103,7 +104,7 @@ bash transfer/install.sh
 | `FASTEMBED_CACHE_PATH` | *(fastembed default)* | ONNX model cache directory |
 | `BASE_URL` | `http://localhost:8000` | Public base URL for `file_url` construction |
 | `FILES_ROOT` | `/data` | Directory served at `/files/` |
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` |
-| `FASTMCP_HOST` | `127.0.0.1` | Bind address (SSE mode) |
-| `FASTMCP_PORT` | `8000` | Port (SSE mode) |
+| `MCP_TRANSPORT` | `streamable-http` | `stdio`, `sse`, or `streamable-http` |
+| `FASTMCP_HOST` | `127.0.0.1` | Bind address (HTTP/SSE modes) |
+| `FASTMCP_PORT` | `8000` | Port (HTTP/SSE modes) |
 | `RAG_MCP_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |

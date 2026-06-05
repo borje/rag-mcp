@@ -153,16 +153,18 @@ def rag_status() -> StoreStatus:
 if __name__ == "__main__":
     import uvicorn
 
-    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
     host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
     port = int(os.environ.get("FASTMCP_PORT", "8000"))
 
-    if transport == "sse":
+    if transport in {"sse", "streamable-http"}:
         from contextlib import asynccontextmanager
 
         from starlette.applications import Starlette
         from starlette.routing import Mount
         from starlette.staticfiles import StaticFiles
+
+        mcp_app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
 
         def _startup_ingest():
             print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
@@ -198,13 +200,17 @@ if __name__ == "__main__":
                 _startup_ingest()
             except KeyboardInterrupt:
                 print("[startup] interrupted", flush=True)
-            yield
+            if transport == "streamable-http":
+                async with mcp_app.router.lifespan_context(mcp_app):
+                    yield
+            else:
+                yield
 
         app = Starlette(
             lifespan=lifespan,
             routes=[
                 Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
-                Mount("/", app=mcp.sse_app()),
+                Mount("/", app=mcp_app),
             ],
         )
         try:
