@@ -77,19 +77,20 @@ def _ingest_files_root() -> IngestResult:
     removed_sources = _cleanup_stale_sources()
     files: list[FileIngestResult] = []
     skipped: list[str] = []
-    ingested_sources = set(store.list_sources())
     for f in sorted(FILES_ROOT.glob("**/*")):
-        if (
-            f.is_file()
-            and f.suffix.lower() in supported
-            and str(f) not in ingested_sources
-        ):
-            chunks = chunk_file(f)
-            if chunks:
-                n = store.ingest(chunks)
-                files.append(FileIngestResult(file=f.name, chunks=n))
-            else:
-                skipped.append(f.name)
+        if not f.is_file() or f.suffix.lower() not in supported:
+            continue
+        current_mtime = f.stat().st_mtime
+        if store.source_mtime(str(f)) == current_mtime:
+            continue
+        if store.source_mtime(str(f)) is not None:
+            store.delete_source(str(f))
+        chunks = chunk_file(f)
+        if chunks:
+            n = store.ingest(chunks, mtime=current_mtime)
+            files.append(FileIngestResult(file=f.name, chunks=n))
+        else:
+            skipped.append(f.name)
 
     return IngestResult(
         total_chunks=sum(r.chunks for r in files),

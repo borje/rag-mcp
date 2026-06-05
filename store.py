@@ -1,4 +1,5 @@
 """Vector + BM25 hybrid store backed by numpy arrays and JSON metadata."""
+
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,12 @@ class RAGStore:
         STORE_DIR.mkdir(parents=True, exist_ok=True)
         self._meta_path = STORE_DIR / "meta.json"
         self._vec_path = STORE_DIR / "vectors.npy"
+        self._mtimes_path = STORE_DIR / "mtimes.json"
         self._model = None
         self._chunks: list[dict] = []
         self._vectors: Optional[np.ndarray] = None
         self._bm25: Optional[BM25Okapi] = None
+        self._mtimes: dict[str, float] = {}
         self._load()
 
     def _load(self):
@@ -27,6 +30,8 @@ class RAGStore:
             self._chunks = json.loads(self._meta_path.read_text(encoding="utf-8"))
         if self._vec_path.exists() and self._chunks:
             self._vectors = np.load(str(self._vec_path))
+        if self._mtimes_path.exists():
+            self._mtimes = json.loads(self._mtimes_path.read_text(encoding="utf-8"))
         self._rebuild_bm25()
 
     def _save(self):
@@ -38,6 +43,10 @@ class RAGStore:
             np.save(str(self._vec_path), self._vectors)
         elif self._vec_path.exists():
             self._vec_path.unlink()
+        self._mtimes_path.write_text(
+            json.dumps(self._mtimes, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _rebuild_bm25(self):
         if self._chunks:
@@ -49,25 +58,39 @@ class RAGStore:
     def model(self):
         if self._model is None:
             from fastembed import TextEmbedding
+
             self._model = TextEmbedding(MODEL_NAME)
         return self._model
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         return np.array(list(self.model.embed(texts)), dtype=np.float32)
 
-    def ingest(self, chunks: list[dict], batch_size: int = 64) -> int:
+    def ingest(
+        self, chunks: list[dict], mtime: float | None = None, batch_size: int = 64
+    ) -> int:
         if not chunks:
             return 0
         total = 0
         for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
+            batch = chunks[i : i + batch_size]
             new_vecs = self._embed([c["body"] for c in batch])
             self._chunks.extend(batch)
-            self._vectors = new_vecs if self._vectors is None else np.vstack([self._vectors, new_vecs])
+            self._vectors = (
+                new_vecs
+                if self._vectors is None
+                else np.vstack([self._vectors, new_vecs])
+            )
             total += len(batch)
+            self._save()
+        if mtime is not None:
+            for chunk in chunks:
+                self._mtimes[chunk["source"]] = mtime
             self._save()
         self._rebuild_bm25()
         return total
+
+    def source_mtime(self, source: str) -> float | None:
+        return self._mtimes.get(source)
 
     def delete_source(self, source: str) -> int:
         if not self._chunks:
@@ -78,6 +101,7 @@ class RAGStore:
             return 0
         self._chunks = [self._chunks[i] for i in keep]
         self._vectors = self._vectors[np.array(keep)] if keep else None
+        self._mtimes.pop(source, None)
         self._rebuild_bm25()
         self._save()
         return removed
