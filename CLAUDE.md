@@ -12,7 +12,11 @@ uv pip install --python .venv/bin/python -r requirements.txt
 python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-small-en-v1.5').embed(['warmup']))"
 ```
 
-No test suite. Manual testing via MCP tools or direct Python invocation.
+Run tests: `uv run pytest tests/`
+
+## Testing
+
+Implement features with red-green-refactor TDD: write failing test first, make it pass minimally, then refactor. Use `/tdd` skill for guided TDD sessions. Tests live in `tests/`.
 
 ## Running
 
