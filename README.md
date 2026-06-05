@@ -25,11 +25,9 @@ This means exact-term queries and semantic queries both work well.
 
 | Tool | Description |
 |------|-------------|
-| `ingest_file` | Ingest a single file |
-| `ingest_directory` | Ingest all supported files in a directory tree |
+| `ingest` | Scan `FILES_ROOT` and ingest supported new documents |
 | `search` | Hybrid vector + BM25 search, returns JSON |
 | `list_sources` | List all ingested source paths |
-| `delete_source` | Remove all chunks for a source (use path from `list_sources`) |
 | `rag_status` | Chunk count, source count, model, store path |
 
 ### Search result format
@@ -63,8 +61,10 @@ The server listens on port 8000. Source files placed in `./data/` are served at 
 
 **Ingest your docs:**
 ```
-ingest_directory /data
+ingest
 ```
+
+To remove documents from the index, delete them from `FILES_ROOT`, then run `ingest` or restart the server.
 
 > Set `BASE_URL` in `docker-compose.yaml` to your externally-accessible hostname when deploying behind a reverse proxy.
 
