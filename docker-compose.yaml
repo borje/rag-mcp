@@ -4,12 +4,10 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ./data:/data
+      - ${DATA_DIR}:/data
       - rag-store:/store
-    environment:
-      # BASE_URL must be the externally-accessible URL — callers outside Docker
-      # cannot reach localhost:8000 inside the container. Override for production.
-      - BASE_URL=http://localhost:8001
+    # environment:
+    #   - BASE_URL=http://localhost:8001
 
 volumes:
   rag-store:
