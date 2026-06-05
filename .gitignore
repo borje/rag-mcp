@@ -16,3 +16,7 @@ __pycache__/
 .local/
 .env
 models
+
+# Local editor/MCP config
+.mcp.json
+opencode.json
