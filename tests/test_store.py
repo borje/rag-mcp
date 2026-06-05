@@ -161,6 +161,38 @@ def test_unchanged_file_is_skipped(tmp_path, monkeypatch):
     assert r2.total_files == 0, f"Expected 0 files re-ingested, got {r2.total_files}"
 
 
+def test_deleted_file_chunks_removed_on_ingest(tmp_path, monkeypatch):
+    """Deleting a file from FILES_ROOT and calling ingest must remove its chunks."""
+    import server as server_module
+    from server import _ingest_files_root
+
+    files_root = tmp_path / "files"
+    files_root.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+
+    monkeypatch.setattr(store_module, "STORE_DIR", store_dir)
+    monkeypatch.setattr(server_module, "FILES_ROOT", files_root)
+
+    fresh = RAGStore()
+    monkeypatch.setattr(
+        fresh, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    monkeypatch.setattr(server_module, "store", fresh)
+
+    doc = files_root / "api.md"
+    doc.write_text("# API\n\n" + "Content. " * 20)
+
+    _ingest_files_root()
+    assert len(fresh._chunks) > 0
+
+    doc.unlink()
+    result = _ingest_files_root()
+
+    assert len(fresh._chunks) == 0
+    assert str(doc) in result.removed_sources
+
+
 # ── regression tests: PASS before AND after ───────────────────────────────────
 
 
