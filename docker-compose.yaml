@@ -8,7 +8,7 @@ services:
       - rag-store:/store
       - rag-models:/models
     environment:
-      - BASE_URL=http://localhost:${EXTERNAL_PORT:-8001}
+      - BASE_URL=http://${FQDN:-localhost}:${EXTERNAL_PORT:-8001}
 
 volumes:
   rag-store:
