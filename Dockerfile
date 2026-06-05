@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --no-index \
 COPY transfer/models /app/models
 
 # Application source (always from project root, not the transfer snapshot)
-COPY server.py store.py chunkers.py /app/
+COPY server.py store.py chunkers.py dashboard.py /app/
 
 VOLUME /data
 

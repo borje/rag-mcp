@@ -10,6 +10,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
+import dashboard
 from chunkers import chunk_file
 from store import RAGStore
 
@@ -26,11 +27,19 @@ WATCH_INTERVAL = int(os.environ.get("RAG_MCP_WATCH_INTERVAL", "30"))
 
 
 def _file_url(source: str) -> str | None:
-    try:
-        rel = Path(source).relative_to(FILES_ROOT)
-        return f"{BASE_URL}/files/{rel}"
-    except ValueError:
-        return None
+    return dashboard.file_url(source, FILES_ROOT, BASE_URL)
+
+
+def dashboard_data() -> dict:
+    return dashboard.dashboard_data(store, FILES_ROOT, BASE_URL)
+
+
+def dashboard_chunk(chunk_id: str) -> dict | None:
+    return dashboard.dashboard_chunk(store, FILES_ROOT, chunk_id)
+
+
+def dashboard_html() -> str:
+    return dashboard.dashboard_html(BASE_URL)
 
 
 class SearchResult(BaseModel):
@@ -62,7 +71,7 @@ class IngestResult(BaseModel):
     removed_sources: list[str]
 
 
-def _ingest_files_root() -> IngestResult:
+def _ingest_files_root(log=None) -> IngestResult:
     """Ingest supported files under FILES_ROOT and remove stale sources."""
     supported = {
         ".yaml",
@@ -79,19 +88,45 @@ def _ingest_files_root() -> IngestResult:
     removed_sources = _cleanup_stale_sources()
     files: list[FileIngestResult] = []
     skipped: list[str] = []
-    for f in sorted(FILES_ROOT.glob("**/*")):
+    candidates = [
+        f
+        for f in sorted(FILES_ROOT.glob("**/*"))
+        if f.is_file() and f.suffix.lower() in supported
+    ]
+    if log:
+        log(f"found {len(candidates)} supported file(s)")
+    for i, f in enumerate(candidates, 1):
+        label = f.relative_to(FILES_ROOT)
         if not f.is_file() or f.suffix.lower() not in supported:
             continue
         current_mtime = f.stat().st_mtime
         if store.source_mtime(str(f)) == current_mtime:
+            if log:
+                log(f"[{i}/{len(candidates)}] unchanged {label}")
             continue
         if store.source_mtime(str(f)) is not None:
+            if log:
+                log(f"[{i}/{len(candidates)}] changed {label}; removing old chunks")
             store.delete_source(str(f))
+        if log:
+            log(f"[{i}/{len(candidates)}] chunking {label}")
         chunks = chunk_file(f)
         if chunks:
-            n = store.ingest(chunks, mtime=current_mtime)
+            if log:
+                log(f"[{i}/{len(candidates)}] embedding {label} ({len(chunks)} chunks)")
+            n = store.ingest(
+                chunks,
+                mtime=current_mtime,
+                log=(lambda message: log(f"[{i}/{len(candidates)}] {label}: {message}"))
+                if log
+                else None,
+            )
+            if log:
+                log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
             files.append(FileIngestResult(file=f.name, chunks=n))
         else:
+            if log:
+                log(f"[{i}/{len(candidates)}] skipped {label} (no chunks extracted)")
             skipped.append(f.name)
 
     return IngestResult(
@@ -164,15 +199,30 @@ if __name__ == "__main__":
         from contextlib import asynccontextmanager
 
         from starlette.applications import Starlette
-        from starlette.routing import Mount
+        from starlette.responses import HTMLResponse, JSONResponse
+        from starlette.routing import Mount, Route
         from starlette.staticfiles import StaticFiles
 
         mcp_app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
 
+        async def _dashboard_page(request):
+            return HTMLResponse(dashboard_html())
+
+        async def _dashboard_data_route(request):
+            return JSONResponse(dashboard_data())
+
+        async def _dashboard_chunk_route(request):
+            chunk = dashboard_chunk(request.path_params["chunk_id"])
+            if chunk is None:
+                return JSONResponse({"error": "chunk not found"}, status_code=404)
+            return JSONResponse(chunk)
+
         def _startup_ingest():
             print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
             try:
-                result = _ingest_files_root()
+                result = _ingest_files_root(
+                    lambda message: print(f"[startup] {message}", flush=True)
+                )
                 for s in result.removed_sources:
                     print(f"[startup] removed stale source {Path(s).name}", flush=True)
                 for name in result.skipped_files:
@@ -219,7 +269,13 @@ if __name__ == "__main__":
         app = Starlette(
             lifespan=lifespan,
             routes=[
-                Mount("/files", StaticFiles(directory=str(FILES_ROOT))),
+                Route("/dashboard", _dashboard_page),
+                Route("/dashboard/data", _dashboard_data_route),
+                Route("/dashboard/chunk/{chunk_id:path}", _dashboard_chunk_route),
+                Mount(
+                    "/files",
+                    StaticFiles(directory=str(FILES_ROOT), check_dir=False),
+                ),
                 Mount("/", app=mcp_app),
             ],
         )

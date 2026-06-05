@@ -66,13 +66,20 @@ class RAGStore:
         return np.array(list(self.model.embed(texts)), dtype=np.float32)
 
     def ingest(
-        self, chunks: list[dict], mtime: float | None = None, batch_size: int = 64
+        self,
+        chunks: list[dict],
+        mtime: float | None = None,
+        batch_size: int = 64,
+        log=None,
     ) -> int:
         if not chunks:
             return 0
         total = 0
-        for i in range(0, len(chunks), batch_size):
+        total_batches = (len(chunks) + batch_size - 1) // batch_size
+        for batch_number, i in enumerate(range(0, len(chunks), batch_size), 1):
             batch = chunks[i : i + batch_size]
+            if log:
+                log(f"embedding batch {batch_number}/{total_batches} ({len(batch)} chunks)")
             new_vecs = self._embed([c["body"] for c in batch])
             self._chunks.extend(batch)
             self._vectors = (
@@ -82,6 +89,11 @@ class RAGStore:
             )
             total += len(batch)
             self._save()
+            if log:
+                log(
+                    f"saved batch {batch_number}/{total_batches} "
+                    f"({total}/{len(chunks)} chunks)"
+                )
         if mtime is not None:
             for chunk in chunks:
                 self._mtimes[chunk["source"]] = mtime
