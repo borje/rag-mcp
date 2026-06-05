@@ -2,12 +2,12 @@ services:
   rag-mcp:
     build: .
     ports:
-      - "8001:8000"
+      - "${EXTERNAL_PORT:-8001}:8000"
     volumes:
       - ${DATA_DIR}:/data
       - rag-store:/store
-    # environment:
-    #   - BASE_URL=http://localhost:8001
+    environment:
+      - BASE_URL=http://localhost:${EXTERNAL_PORT:-8001}
 
 volumes:
   rag-store:
