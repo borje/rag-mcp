@@ -2,6 +2,8 @@
 
 import json
 import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -9,7 +11,27 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 STORE_DIR = Path(os.environ.get("RAG_MCP_DATA", Path.home() / ".local/share/rag-mcp"))
-MODEL_NAME = os.environ.get("RAG_MCP_MODEL", "BAAI/bge-small-en-v1.5")
+OPENAI_ENV_VARS = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_EMBEDDINGS_PATH",
+    "OPENAI_TIMEOUT",
+)
+OPENAI_CONFIGURED = any(name in os.environ for name in OPENAI_ENV_VARS)
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+LOCAL_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+MODEL_NAME = os.environ.get(
+    "RAG_MCP_MODEL", OPENAI_DEFAULT_MODEL if OPENAI_CONFIGURED else LOCAL_DEFAULT_MODEL
+)
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_EMBEDDINGS_PATH = os.environ.get("OPENAI_EMBEDDINGS_PATH", "/embeddings")
+OPENAI_TIMEOUT = float(os.environ.get("OPENAI_TIMEOUT", "60"))
+DIMENSION_MISMATCH_ERROR = (
+    "Embedding dimension mismatch. The selected embedding model differs from the "
+    "stored vectors. Clear and re-ingest the store."
+)
 
 
 class RAGStore:
@@ -62,8 +84,54 @@ class RAGStore:
             self._model = TextEmbedding(MODEL_NAME)
         return self._model
 
+    def _using_openai(self) -> bool:
+        return OPENAI_CONFIGURED or any(value for value in (OPENAI_BASE_URL, OPENAI_API_KEY))
+
     def _embed(self, texts: list[str]) -> np.ndarray:
+        if self._using_openai():
+            return self._embed_openai(texts)
         return np.array(list(self.model.embed(texts)), dtype=np.float32)
+
+    def _embed_openai(self, texts: list[str]) -> np.ndarray:
+        base_url = (OPENAI_BASE_URL or OPENAI_DEFAULT_BASE_URL).rstrip("/")
+        if base_url == OPENAI_DEFAULT_BASE_URL and not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required for the default OpenAI API URL")
+        url = f"{base_url}/{OPENAI_EMBEDDINGS_PATH.lstrip('/')}"
+        headers = {"Content-Type": "application/json"}
+        if OPENAI_API_KEY:
+            headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"model": MODEL_NAME, "input": texts}).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=OPENAI_TIMEOUT) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"OpenAI embeddings request failed: HTTP {exc.code}: {detail}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"OpenAI embeddings request failed: {exc.reason}") from exc
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("OpenAI embeddings response was not valid JSON") from exc
+        if "data" not in payload:
+            raise ValueError("OpenAI embeddings response missing data")
+        embeddings = []
+        for item in sorted(payload["data"], key=lambda item: item.get("index", 0)):
+            if "embedding" not in item:
+                raise ValueError("OpenAI embeddings response missing embedding")
+            embeddings.append(item["embedding"])
+        return np.array(embeddings, dtype=np.float32)
+
+    def _check_dimension(self, vectors: np.ndarray):
+        if self._vectors is not None and vectors.shape[1] != self._vectors.shape[1]:
+            raise ValueError(DIMENSION_MISMATCH_ERROR)
 
     def ingest(
         self, chunks: list[dict], mtime: float | None = None, batch_size: int = 64
@@ -74,6 +142,7 @@ class RAGStore:
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i : i + batch_size]
             new_vecs = self._embed([c["body"] for c in batch])
+            self._check_dimension(new_vecs)
             self._chunks.extend(batch)
             self._vectors = (
                 new_vecs
@@ -113,7 +182,7 @@ class RAGStore:
         return {
             "total_chunks": len(self._chunks),
             "total_sources": len(self.list_sources()),
-            "model": MODEL_NAME,
+            "model": f"{'openai' if self._using_openai() else 'fastembed'}:{MODEL_NAME}",
             "store_dir": str(STORE_DIR),
         }
 
@@ -125,6 +194,8 @@ class RAGStore:
 
         # Cosine similarity (vector search)
         q = self._embed([query])[0]
+        if q.shape[0] != self._vectors.shape[1]:
+            raise ValueError(DIMENSION_MISMATCH_ERROR)
         dot = self._vectors @ q
         norms = np.linalg.norm(self._vectors, axis=1) * np.linalg.norm(q)
         norms = np.where(norms < 1e-10, 1e-10, norms)

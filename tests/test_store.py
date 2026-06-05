@@ -5,6 +5,7 @@ exist in the old code, or rely on re-ingest behaviour the old code lacked.
 """
 
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,136 @@ def _chunks(source: str, tag: str = "v1", n: int = 2) -> list[dict]:
         }
         for i in range(n)
     ]
+
+
+def test_default_mode_reports_fastembed_provider(rag_store, monkeypatch):
+    monkeypatch.setattr(store_module, "OPENAI_CONFIGURED", False)
+    monkeypatch.setattr(store_module, "MODEL_NAME", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setattr(store_module, "OPENAI_BASE_URL", None)
+    monkeypatch.setattr(store_module, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(store_module, "OPENAI_EMBEDDINGS_PATH", "/embeddings")
+    monkeypatch.setattr(store_module, "OPENAI_TIMEOUT", 60.0)
+
+    assert rag_store.stats()["model"] == "fastembed:BAAI/bge-small-en-v1.5"
+
+
+def test_openai_mode_sends_expected_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(store_module, "OPENAI_CONFIGURED", True)
+    monkeypatch.setattr(store_module, "MODEL_NAME", "text-embedding-3-small")
+    monkeypatch.setattr(store_module, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(store_module, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(store_module, "OPENAI_EMBEDDINGS_PATH", "/embeddings")
+    monkeypatch.setattr(store_module, "OPENAI_TIMEOUT", 12.0)
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(store_module.urllib.request, "urlopen", fake_urlopen)
+
+    s = RAGStore()
+    s.ingest(_chunks("/docs/api.md", n=1))
+
+    assert captured == {
+        "url": "https://api.openai.com/v1/embeddings",
+        "headers": {
+            "Content-type": "application/json",
+            "Authorization": "Bearer sk-test",
+        },
+        "body": {"model": "text-embedding-3-small", "input": [_chunks("/docs/api.md", n=1)[0]["body"]]},
+        "timeout": 12.0,
+    }
+
+
+def test_openai_mode_allows_missing_key_for_local_base_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(store_module, "OPENAI_CONFIGURED", True)
+    monkeypatch.setattr(store_module, "MODEL_NAME", "nomic-embed-text")
+    monkeypatch.setattr(store_module, "OPENAI_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setattr(store_module, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(store_module, "OPENAI_EMBEDDINGS_PATH", "/embeddings")
+    monkeypatch.setattr(store_module, "OPENAI_TIMEOUT", 60.0)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        assert "Authorization" not in dict(request.header_items())
+        return Response()
+
+    monkeypatch.setattr(store_module.urllib.request, "urlopen", fake_urlopen)
+
+    assert RAGStore().ingest(_chunks("/docs/api.md", n=1)) == 1
+
+
+def test_openai_embeddings_are_sorted_by_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(store_module, "OPENAI_CONFIGURED", True)
+    monkeypatch.setattr(store_module, "MODEL_NAME", "text-embedding-3-small")
+    monkeypatch.setattr(store_module, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(store_module, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(store_module, "OPENAI_EMBEDDINGS_PATH", "/embeddings")
+    monkeypatch.setattr(store_module, "OPENAI_TIMEOUT", 60.0)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"index": 1, "embedding": [2.0, 2.0]},
+                        {"index": 0, "embedding": [1.0, 1.0]},
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(store_module.urllib.request, "urlopen", lambda request, timeout: Response())
+
+    s = RAGStore()
+    s.ingest(_chunks("/docs/api.md", n=2))
+
+    assert s._vectors.tolist() == [[1.0, 1.0], [2.0, 2.0]]
+
+
+def test_dimension_mismatch_raises_clear_error(rag_store, monkeypatch):
+    message = "Embedding dimension mismatch. The selected embedding model differs from the stored vectors. Clear and re-ingest the store."
+    rag_store.ingest(_chunks("/docs/api.md", n=1))
+    monkeypatch.setattr(
+        rag_store, "_embed", lambda texts: np.zeros((len(texts), 3), dtype=np.float32)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        rag_store.ingest(_chunks("/docs/other.md", n=1))
+
+    with pytest.raises(ValueError, match=message):
+        rag_store.search("api")
 
 
 # ── store unit tests: FAIL before fix ─────────────────────────────────────────

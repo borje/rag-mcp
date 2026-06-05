@@ -1,12 +1,12 @@
 # rag-mcp
 
-A hybrid RAG (Retrieval-Augmented Generation) server exposed as an [MCP](https://modelcontextprotocol.io) tool. Runs fully offline — no cloud APIs, no telemetry. Embeddings use [fastembed](https://github.com/qdrant/fastembed) with a bundled ONNX model.
+A hybrid RAG (Retrieval-Augmented Generation) server exposed as an [MCP](https://modelcontextprotocol.io) tool. Runs fully offline by default with [fastembed](https://github.com/qdrant/fastembed) and a bundled ONNX model. Optional OpenAI-compatible HTTP embeddings are supported.
 
 ## How it works
 
 Search combines two signals via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf):
 
-- **Vector search** — cosine similarity over `BAAI/bge-small-en-v1.5` embeddings
+- **Vector search** — cosine similarity over local fastembed or OpenAI-compatible embeddings
 - **BM25** — classic keyword search
 
 This means exact-term queries and semantic queries both work well.
@@ -128,5 +128,36 @@ bash transfer/install.sh
 | `MCP_TRANSPORT` | `streamable-http` | `stdio`, `sse`, or `streamable-http` |
 | `FASTMCP_HOST` | `127.0.0.1` | Bind address (HTTP/SSE modes) |
 | `FASTMCP_PORT` | `8000` | Port (HTTP/SSE modes) |
-| `RAG_MCP_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |
+| `RAG_MCP_MODEL` | Local: `BAAI/bge-small-en-v1.5`; OpenAI mode: `text-embedding-3-small` | Embedding model name |
 | `RAG_MCP_WATCH_INTERVAL` | `30` | Seconds between auto-ingest polls (SSE/HTTP only). Set to `0` to disable. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
+| `OPENAI_API_KEY` | unset | Optional bearer token |
+| `OPENAI_EMBEDDINGS_PATH` | `/embeddings` | Embeddings endpoint path |
+| `OPENAI_TIMEOUT` | `60` | HTTP timeout seconds |
+
+If no `OPENAI_*` env vars are set, embeddings stay offline with fastembed. If any relevant `OPENAI_*` env var is set, the store uses OpenAI-compatible HTTP embeddings.
+
+Changing embedding provider or model changes vector dimensions/space. Clear and re-ingest the store before switching models.
+
+### OpenAI-Compatible Embeddings
+
+**OpenAI**
+```bash
+OPENAI_API_KEY=sk-...
+RAG_MCP_MODEL=text-embedding-3-small
+```
+
+**OpenRouter**
+```bash
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=...
+RAG_MCP_MODEL=<embedding-model-id>
+```
+
+**Ollama**
+```bash
+OPENAI_BASE_URL=http://localhost:11434/v1
+RAG_MCP_MODEL=nomic-embed-text
+```
+
+No `OPENAI_API_KEY` is required for local Ollama.
