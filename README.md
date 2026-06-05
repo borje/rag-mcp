@@ -68,6 +68,27 @@ To remove documents from the index, delete them from `FILES_ROOT`, then run `ing
 
 > Set `BASE_URL` in `docker-compose.yaml` to your externally-accessible hostname when deploying behind a reverse proxy.
 
+## Typical workflows
+
+**Add documents**
+1. Copy files into `FILES_ROOT` (or `DATA_DIR` in Docker)
+2. Call `ingest` — only new/changed files are re-chunked (mtime-based)
+
+**Remove documents**
+1. Delete files from `FILES_ROOT`
+2. Call `ingest` — stale chunks are purged automatically
+
+**Update a document**
+1. Overwrite the file in `FILES_ROOT`
+2. Call `ingest` — mtime change triggers re-chunk
+
+**Check index health**
+- `rag_status` — chunk + source counts, model, store path
+- `list_sources` — paths of every ingested file
+
+**Docker restart as shortcut**
+`docker compose restart` triggers startup ingest — equivalent to calling `ingest` manually.
+
 ## Running locally (stdio, for Claude Code)
 
 ```bash
