@@ -7,7 +7,8 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Application source (always from project root, not the transfer snapshot)
-COPY server.py store.py chunkers.py dashboard.py /app/
+COPY server.py store.py chunkers.py dashboard.py reset-store.sh /app/
+RUN chmod +x /app/reset-store.sh
 
 VOLUME /data
 VOLUME /models

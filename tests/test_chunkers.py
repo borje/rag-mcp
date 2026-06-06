@@ -6,13 +6,22 @@ All green = chunking meets retrieval-quality bar.
 
 import pytest
 from pathlib import Path
-from chunkers import chunk_markdown
+from chunkers import chunk_markdown, chunk_pdf
 
 # Target: no chunk should exceed this many chars.
 MAX_CHUNK_CHARS = 1200
 
 # Overlap: adjacent sub-chunks of a split section must share at least this many chars.
 MIN_OVERLAP_CHARS = 50
+
+REQUIRED_METADATA = {
+    "source_name",
+    "section_path",
+    "chunk_index",
+    "chunk_total",
+    "page_start",
+    "page_end",
+}
 
 # ----- fixtures ----------------------------------------------------------------
 
@@ -148,3 +157,43 @@ def test_chunk_type_is_section(md_file: Path):
     chunks = chunks_list(md_file)
     for c in chunks:
         assert c["chunk_type"] == "section"
+
+
+def test_markdown_chunks_include_required_metadata(md_file: Path):
+    chunks = chunks_list(md_file)
+    for c in chunks:
+        assert REQUIRED_METADATA <= c.keys()
+        assert c["source_name"] == "api_docs.md"
+        assert c["page_start"] is None
+        assert c["page_end"] is None
+
+
+def test_markdown_split_chunks_have_section_indices(md_file: Path):
+    chunks = chunks_list(md_file)
+    auth_chunks = _chunks_containing(chunks, "auth-para")
+
+    assert len(auth_chunks) > 1
+    assert [c["chunk_index"] for c in auth_chunks] == list(range(len(auth_chunks)))
+    assert {c["chunk_total"] for c in auth_chunks} == {len(auth_chunks)}
+    assert {c["section_path"] for c in auth_chunks} == {"Authentication"}
+
+
+def test_pdf_chunks_include_page_metadata(tmp_path: Path):
+    fitz = pytest.importorskip("fitz")
+
+    pdf = tmp_path / "guide.pdf"
+    doc = fitz.open()
+    for page_text in ["First page content " * 10, "Second page content " * 10]:
+        page = doc.new_page()
+        page.insert_text((72, 72), page_text)
+    doc.save(pdf)
+    doc.close()
+
+    chunks = list(chunk_pdf(pdf))
+
+    assert len(chunks) == 2
+    assert [c["page_start"] for c in chunks] == [1, 2]
+    assert [c["page_end"] for c in chunks] == [1, 2]
+    assert [c["chunk_index"] for c in chunks] == [0, 1]
+    assert {c["chunk_total"] for c in chunks} == {2}
+    assert {c["section_path"] for c in chunks} == {"guide"}

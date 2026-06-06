@@ -22,6 +22,7 @@ from server import _cleanup_stale_sources, _ingest_files_root, ingest
 def mock_store():
     s = MagicMock()
     s.list_sources.return_value = []
+    s.source_mtime.return_value = None
     s.ingest.return_value = 3
     s.delete_source.return_value = 2
     return s
@@ -47,6 +48,7 @@ def test_ingest_files_root_skips_already_ingested(mock_store, tmp_path):
     f = tmp_path / "doc.md"
     f.write_text("# Title\n\n" + "word " * 30)
     mock_store.list_sources.return_value = [str(f)]
+    mock_store.source_mtime.return_value = f.stat().st_mtime
     with (
         patch.object(server, "store", mock_store),
         patch.object(server, "FILES_ROOT", tmp_path),

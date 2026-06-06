@@ -11,6 +11,24 @@ def _id() -> str:
     return str(uuid.uuid4())
 
 
+def _meta(
+    path: Path,
+    section_path: str,
+    chunk_index: int,
+    chunk_total: int,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> dict:
+    return {
+        "source_name": path.name,
+        "section_path": section_path,
+        "chunk_index": chunk_index,
+        "chunk_total": chunk_total,
+        "page_start": page_start,
+        "page_end": page_end,
+    }
+
+
 # ── OpenAPI (OAS2 / OAS3) ────────────────────────────────────────────────────
 
 
@@ -25,59 +43,64 @@ def chunk_openapi(path: Path) -> Iterator[dict]:
     title = spec.get("info", {}).get("title", path.stem)
     base = spec.get("servers", [{}])[0].get("url", "") or spec.get("host", "")
 
+    operations = []
     for path_str, methods in (spec.get("paths") or {}).items():
         if not isinstance(methods, dict):
             continue
         for method, op in methods.items():
             if method.startswith("x-") or not isinstance(op, dict):
                 continue
+            operations.append((path_str, method, op))
 
-            summary = op.get("summary") or op.get("operationId") or ""
-            description = op.get("description") or ""
-            params = op.get("parameters") or []
-            req_body = op.get("requestBody") or {}
-            responses = op.get("responses") or {}
-            tags = ", ".join(op.get("tags") or [])
+    total = len(operations)
+    for idx, (path_str, method, op) in enumerate(operations):
+        summary = op.get("summary") or op.get("operationId") or ""
+        description = op.get("description") or ""
+        params = op.get("parameters") or []
+        req_body = op.get("requestBody") or {}
+        responses = op.get("responses") or {}
+        tags = ", ".join(op.get("tags") or [])
 
-            lines = [f"{method.upper()} {path_str}"]
-            if base:
-                lines.append(f"Base: {base}")
-            if tags:
-                lines.append(f"Tags: {tags}")
-            if summary:
-                lines.append(f"Summary: {summary}")
-            if description:
-                lines.append(f"Description: {description.strip()[:600]}")
-            if params:
-                plines = []
-                for p in params[:20]:
-                    loc = p.get("in", "")
-                    name = p.get("name", "")
-                    req = " (required)" if p.get("required") else ""
-                    desc = p.get("description") or ""
-                    schema = p.get("schema") or {}
-                    typ = schema.get("type") or p.get("type") or ""
-                    plines.append(f"  [{loc}] {name}{req} {typ}: {desc}")
-                lines.append("Parameters:\n" + "\n".join(plines))
-            if req_body:
-                content_types = ", ".join((req_body.get("content") or {}).keys())
-                rb_desc = req_body.get("description") or ""
-                lines.append(f"Request body ({content_types}): {rb_desc}")
-            if responses:
-                rlines = [
-                    f"  {code}: {(v or {}).get('description', '')}"
-                    for code, v in list(responses.items())[:8]
-                ]
-                lines.append("Responses:\n" + "\n".join(rlines))
+        lines = [f"{method.upper()} {path_str}"]
+        if base:
+            lines.append(f"Base: {base}")
+        if tags:
+            lines.append(f"Tags: {tags}")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        if description:
+            lines.append(f"Description: {description.strip()[:600]}")
+        if params:
+            plines = []
+            for p in params[:20]:
+                loc = p.get("in", "")
+                name = p.get("name", "")
+                req = " (required)" if p.get("required") else ""
+                desc = p.get("description") or ""
+                schema = p.get("schema") or {}
+                typ = schema.get("type") or p.get("type") or ""
+                plines.append(f"  [{loc}] {name}{req} {typ}: {desc}")
+            lines.append("Parameters:\n" + "\n".join(plines))
+        if req_body:
+            content_types = ", ".join((req_body.get("content") or {}).keys())
+            rb_desc = req_body.get("description") or ""
+            lines.append(f"Request body ({content_types}): {rb_desc}")
+        if responses:
+            rlines = [
+                f"  {code}: {(v or {}).get('description', '')}"
+                for code, v in list(responses.items())[:8]
+            ]
+            lines.append("Responses:\n" + "\n".join(rlines))
 
-            yield {
-                "id": _id(),
-                "source": str(path),
-                "doc_title": title,
-                "chunk_type": "endpoint",
-                "title": f"{method.upper()} {path_str}",
-                "body": "\n".join(lines),
-            }
+        yield {
+            "id": _id(),
+            "source": str(path),
+            **_meta(path, f"{method.upper()} {path_str}", idx, total),
+            "doc_title": title,
+            "chunk_type": "endpoint",
+            "title": f"{method.upper()} {path_str}",
+            "body": "\n".join(lines),
+        }
 
 
 # ── Markdown ─────────────────────────────────────────────────────────────────
@@ -143,6 +166,7 @@ def chunk_markdown(path: Path) -> Iterator[dict]:
             yield {
                 "id": _id(),
                 "source": str(path),
+                **_meta(path, title, idx, total),
                 "doc_title": path.stem,
                 "chunk_type": "section",
                 "title": title if total == 1 else f"{title} ({idx + 1}/{total})",
@@ -157,17 +181,23 @@ def chunk_pdf(path: Path) -> Iterator[dict]:
     import fitz  # pymupdf
 
     doc = fitz.open(str(path))
+    pages = []
     for i, page in enumerate(doc):
         text = page.get_text().strip()
         if text:
-            yield {
-                "id": _id(),
-                "source": str(path),
-                "doc_title": path.stem,
-                "chunk_type": "page",
-                "title": f"{path.stem} p.{i + 1}",
-                "body": text,
-            }
+            pages.append((i, text))
+    total = len(pages)
+    for idx, (page_index, text) in enumerate(pages):
+        page_number = page_index + 1
+        yield {
+            "id": _id(),
+            "source": str(path),
+            **_meta(path, path.stem, idx, total, page_number, page_number),
+            "doc_title": path.stem,
+            "chunk_type": "page",
+            "title": f"{path.stem} p.{page_number}",
+            "body": text,
+        }
     doc.close()
 
 
@@ -180,27 +210,32 @@ def chunk_docx(path: Path) -> Iterator[dict]:
     doc = Document(str(path))
     heading = path.stem
     paras: list[str] = []
+    sections: list[tuple[str, str]] = []
 
     def flush():
         if paras:
-            yield {
-                "id": _id(),
-                "source": str(path),
-                "doc_title": path.stem,
-                "chunk_type": "section",
-                "title": heading,
-                "body": "\n".join(paras),
-            }
+            sections.append((heading, "\n".join(paras)))
 
     for para in doc.paragraphs:
         if para.style.name.startswith("Heading"):
-            yield from flush()
+            flush()
             paras.clear()
             heading = para.text or heading
         elif para.text.strip():
             paras.append(para.text)
 
-    yield from flush()
+    flush()
+    total = len(sections)
+    for idx, (section_heading, body) in enumerate(sections):
+        yield {
+            "id": _id(),
+            "source": str(path),
+            **_meta(path, section_heading, idx, total),
+            "doc_title": path.stem,
+            "chunk_type": "section",
+            "title": section_heading,
+            "body": body,
+        }
 
 
 # ── Plain text ────────────────────────────────────────────────────────────────
@@ -209,10 +244,12 @@ def chunk_docx(path: Path) -> Iterator[dict]:
 def chunk_text(path: Path) -> Iterator[dict]:
     text = path.read_text(encoding="utf-8", errors="replace")
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    total = len(paragraphs)
     for i, para in enumerate(paragraphs):
         yield {
             "id": _id(),
             "source": str(path),
+            **_meta(path, path.stem, i, total),
             "doc_title": path.stem,
             "chunk_type": "paragraph",
             "title": f"{path.stem} [{i + 1}]",

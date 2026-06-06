@@ -44,10 +44,17 @@ def dashboard_html() -> str:
 
 class SearchResult(BaseModel):
     title: str
+    source_name: str
     doc_title: str | None
     chunk_type: str | None
+    section_path: str
+    chunk_index: int
+    chunk_total: int
+    page_start: int | None
+    page_end: int | None
     file_url: str | None
     score: float
+    match_type: str
     body: str
 
 
@@ -166,10 +173,17 @@ def search(query: str, n_results: int = 8) -> list[SearchResult]:
     return [
         SearchResult(
             title=r["title"],
+            source_name=r["source_name"],
             doc_title=r.get("doc_title"),
             chunk_type=r.get("chunk_type"),
+            section_path=r["section_path"],
+            chunk_index=r["chunk_index"],
+            chunk_total=r["chunk_total"],
+            page_start=r["page_start"],
+            page_end=r["page_end"],
             file_url=_file_url(r["source"]),
             score=r["score"],
+            match_type=r["match_type"],
             body=r["body"],
         )
         for r in results

@@ -11,6 +11,8 @@ Search combines two signals via [Reciprocal Rank Fusion](https://plg.uwaterloo.c
 
 This means exact-term queries and semantic queries both work well.
 
+By default, search also includes adjacent chunks from the same source and section (`RAG_MCP_ADJACENT_CHUNKS=1`) while keeping `n_results` as a hard cap.
+
 ## Supported file types
 
 | Format | Chunking strategy |
@@ -36,14 +38,23 @@ This means exact-term queries and semantic queries both work well.
 [
   {
     "title": "POST /api/users",
+    "source_name": "api-spec.yaml",
     "doc_title": "My API",
     "chunk_type": "endpoint",
+    "section_path": "POST /api/users",
+    "chunk_index": 0,
+    "chunk_total": 1,
+    "page_start": null,
+    "page_end": null,
     "file_url": "http://localhost:8000/files/api-spec.yaml",
     "score": 0.0312,
+    "match_type": "hit",
     "body": "POST /api/users\nSummary: Create a new user\n..."
   }
 ]
 ```
+
+`match_type` is `hit` for directly ranked chunks and `adjacent` for context chunks included from the same source and section.
 
 `file_url` points to the source file served by the built-in HTTP server (SSE mode). It is `null` if the file is not under `FILES_ROOT`.
 
@@ -68,6 +79,15 @@ ingest
 
 To remove documents from the index, delete them from `FILES_ROOT`, then run `ingest` or restart the server.
 
+**Force full reingestion:**
+
+```bash
+docker compose exec rag-mcp /app/reset-store.sh
+docker compose restart rag-mcp
+```
+
+This clears persisted store files inside the container store volume. Restarting triggers startup ingest and rebuilds the index from `FILES_ROOT`.
+
 > Set `BASE_URL` in `docker-compose.yaml` to your externally-accessible hostname when deploying behind a reverse proxy.
 
 ## Typical workflows
@@ -90,6 +110,9 @@ To remove documents from the index, delete them from `FILES_ROOT`, then run `ing
 
 **Docker restart as shortcut**
 `docker compose restart` triggers startup ingest — equivalent to calling `ingest` manually.
+
+**Force full reingestion**
+`docker compose exec rag-mcp /app/reset-store.sh`, then `docker compose restart rag-mcp`.
 
 ## Running locally (stdio, for Claude Code)
 
@@ -132,3 +155,4 @@ bash transfer/install.sh
 | `FASTMCP_PORT` | `8000` | Port (HTTP/SSE modes) |
 | `RAG_MCP_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |
 | `RAG_MCP_WATCH_INTERVAL` | `30` | Seconds between auto-ingest polls (SSE/HTTP only). Set to `0` to disable. |
+| `RAG_MCP_ADJACENT_CHUNKS` | `1` | Adjacent chunks before/after each hit to include from the same source and section. Set to `0` to disable. |

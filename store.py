@@ -134,6 +134,7 @@ class RAGStore:
             return []
         n = min(n, len(self._chunks))
         pool = min(n * 4, len(self._chunks))
+        adjacent = max(0, int(os.environ.get("RAG_MCP_ADJACENT_CHUNKS", "1")))
 
         # Cosine similarity (vector search)
         q = self._embed([query])[0]
@@ -155,5 +156,56 @@ class RAGStore:
         for rank, idx in enumerate(bm25_ranks):
             rrf[int(idx)] = rrf.get(int(idx), 0.0) + 1.0 / (k + rank + 1)
 
-        top = sorted(rrf, key=lambda i: -rrf[i])[:n]
-        return [{**self._chunks[i], "score": float(rrf[i])} for i in top]
+        ranked = sorted(rrf, key=lambda i: -rrf[i])
+        match_types = {idx: "hit" for idx in ranked}
+        if adjacent:
+            by_location = {
+                (c["source"], c["section_path"], c["chunk_index"]): i
+                for i, c in enumerate(self._chunks)
+            }
+            expanded: list[int] = []
+            seen: set[int] = set()
+            for idx in ranked:
+                chunk = self._chunks[idx]
+                candidates = [idx]
+                for offset in range(1, adjacent + 1):
+                    candidates.append(
+                        by_location.get(
+                            (
+                                chunk["source"],
+                                chunk["section_path"],
+                                chunk["chunk_index"] - offset,
+                            )
+                        )
+                    )
+                    candidates.append(
+                        by_location.get(
+                            (
+                                chunk["source"],
+                                chunk["section_path"],
+                                chunk["chunk_index"] + offset,
+                            )
+                        )
+                    )
+                for candidate in candidates:
+                    if candidate is None or candidate in seen:
+                        continue
+                    expanded.append(candidate)
+                    if candidate != idx:
+                        match_types[candidate] = "adjacent"
+                    seen.add(candidate)
+                    if len(expanded) == n:
+                        break
+                if len(expanded) == n:
+                    break
+            top = expanded
+        else:
+            top = ranked[:n]
+        return [
+            {
+                **self._chunks[i],
+                "score": float(rrf.get(i, 0.0)),
+                "match_type": match_types[i],
+            }
+            for i in top
+        ]

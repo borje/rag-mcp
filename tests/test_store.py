@@ -33,13 +33,29 @@ def _chunks(source: str, tag: str = "v1", n: int = 2) -> list[dict]:
         {
             "id": f"{tag}-{i}",
             "source": source,
+            "source_name": Path(source).name,
             "doc_title": "test",
             "chunk_type": "section",
+            "section_path": "test",
+            "chunk_index": i,
+            "chunk_total": n,
+            "page_start": None,
+            "page_end": None,
             "title": f"Section {i}",
             "body": f"[{tag}] Body text for chunk {i}. Enough content to exceed minimum length filter.",
         }
         for i in range(n)
     ]
+
+
+def _search_chunks(source: str, section: str, n: int = 5) -> list[dict]:
+    chunks = _chunks(source, "search", n)
+    for i, chunk in enumerate(chunks):
+        chunk["id"] = f"c{i}"
+        chunk["section_path"] = section
+        chunk["body"] = f"chunk-{i} ordinary content for adjacent expansion testing"
+    chunks[2]["body"] += " needle"
+    return chunks
 
 
 # ── store unit tests: FAIL before fix ─────────────────────────────────────────
@@ -205,3 +221,48 @@ def test_delete_source_without_prior_mtime_does_not_raise(rag_store):
     """delete_source on a source ingested without mtime must not raise."""
     rag_store.ingest(_chunks("/docs/no-mtime.md"))
     assert rag_store.delete_source("/docs/no-mtime.md") == 2
+
+
+def test_search_interleaves_adjacent_chunks_and_honors_limit(rag_store, monkeypatch):
+    chunks = _search_chunks("/docs/api.md", "Authentication", 5)
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), 5), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if text == "needle":
+                vectors[row, 2] = 1
+                continue
+            for i in range(5):
+                if f"chunk-{i}" in text:
+                    vectors[row, i] = 1
+                    break
+        return vectors
+
+    monkeypatch.setattr(rag_store, "_embed", embed)
+    rag_store.ingest(chunks)
+
+    results = rag_store.search("needle", n=3)
+
+    assert [r["id"] for r in results] == ["c2", "c1", "c3"]
+    assert [r["match_type"] for r in results] == ["hit", "adjacent", "adjacent"]
+
+
+def test_search_adjacent_chunks_do_not_cross_section(rag_store, monkeypatch):
+    chunks = _search_chunks("/docs/api.md", "Authentication", 5)
+    chunks[3]["section_path"] = "Other Section"
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), 5), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if text == "needle":
+                vectors[row, 2] = 1
+            elif "chunk-2" in text:
+                vectors[row, 2] = 1
+        return vectors
+
+    monkeypatch.setattr(rag_store, "_embed", embed)
+    rag_store.ingest(chunks)
+
+    results = rag_store.search("needle", n=2)
+
+    assert [r["id"] for r in results] == ["c2", "c1"]
