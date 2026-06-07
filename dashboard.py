@@ -28,8 +28,9 @@ def preview(text: str, length: int = 300) -> str:
 
 def dashboard_data(store, files_root: Path, base_url: str) -> dict:
     """Return dashboard data grouped by source with chunk previews only."""
+    bodies = store.load_bodies()
     files: dict[str, dict] = {}
-    for chunk in store._chunks:
+    for i, chunk in enumerate(store._chunks):
         source = chunk["source"]
         if source not in files:
             files[source] = {
@@ -46,7 +47,7 @@ def dashboard_data(store, files_root: Path, base_url: str) -> dict:
                 "doc_title": chunk.get("doc_title"),
                 "chunk_type": chunk.get("chunk_type"),
                 "title": chunk.get("title"),
-                "preview": preview(chunk.get("body", "")),
+                "preview": preview(bodies[i] if i < len(bodies) else ""),
             }
         )
 
@@ -63,15 +64,16 @@ def dashboard_data(store, files_root: Path, base_url: str) -> dict:
 
 
 def dashboard_chunk(store, files_root: Path, chunk_id: str) -> dict | None:
-    for chunk in store._chunks:
+    for i, chunk in enumerate(store._chunks):
         if chunk["id"] == chunk_id:
+            bodies = store.load_bodies()
             return {
                 "id": chunk["id"],
                 "title": chunk.get("title"),
                 "chunk_type": chunk.get("chunk_type"),
                 "source": chunk["source"],
                 "path": display_path(chunk["source"], files_root),
-                "body": chunk.get("body", ""),
+                "body": bodies[i] if i < len(bodies) else "",
             }
     return None
 
