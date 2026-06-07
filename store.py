@@ -6,10 +6,91 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from rank_bm25 import BM25Okapi
 
 STORE_DIR = Path(os.environ.get("RAG_MCP_DATA", Path.home() / ".local/share/rag-mcp"))
 MODEL_NAME = os.environ.get("RAG_MCP_MODEL", "BAAI/bge-small-en-v1.5")
+
+
+class _SparseBM25:
+    """BM25Okapi using flat numpy arrays instead of per-doc Python dicts.
+
+    Replaces rank_bm25.BM25Okapi. Identical interface (get_scores), ~5-10x
+    less memory because term-doc data lives in compact numpy arrays rather
+    than a list of Counter dicts.
+    """
+
+    def __init__(self, corpus: list[list[str]], k1: float = 1.5, b: float = 0.75):
+        n = len(corpus)
+        self._n = n
+        if n == 0:
+            return
+
+        # Build vocabulary and per-term posting lists {term_id: [(doc, tf)]}
+        vocab: dict[str, int] = {}
+        posting: dict[int, list] = {}
+        doc_lens = np.zeros(n, dtype=np.int32)
+
+        for d, doc in enumerate(corpus):
+            doc_lens[d] = len(doc)
+            counts: dict[str, int] = {}
+            for tok in doc:
+                counts[tok] = counts.get(tok, 0) + 1
+            for tok, cnt in counts.items():
+                if tok not in vocab:
+                    t = len(vocab)
+                    vocab[tok] = t
+                else:
+                    t = vocab[tok]
+                if t not in posting:
+                    posting[t] = []
+                posting[t].append((d, cnt))
+
+        self._vocab = vocab
+        avgdl = float(doc_lens.mean())
+        V = len(vocab)
+
+        # IDF: log(1 + (n - df + 0.5) / (df + 0.5)) — always non-negative
+        idf = np.zeros(V, dtype=np.float32)
+        for t, posts in posting.items():
+            df = len(posts)
+            idf[t] = np.log1p((n - df + 0.5) / (df + 0.5))
+        self._idf = idf
+
+        # Precompute BM25 term-doc scores in CSC-like flat arrays.
+        # _term_ptr[t]:_term_ptr[t+1] → slice of _doc_indices / _bm25_vals for term t.
+        term_ptr = np.zeros(V + 1, dtype=np.int32)
+        for t in range(V):
+            term_ptr[t + 1] = term_ptr[t] + len(posting.get(t, []))
+        nnz = int(term_ptr[-1])
+
+        doc_indices = np.zeros(nnz, dtype=np.int32)
+        bm25_vals = np.zeros(nnz, dtype=np.float32)
+
+        for t in range(V):
+            start = int(term_ptr[t])
+            for i, (d, tf) in enumerate(posting.get(t, [])):
+                norm = k1 * (1.0 - b + b * float(doc_lens[d]) / avgdl)
+                doc_indices[start + i] = d
+                bm25_vals[start + i] = tf * (k1 + 1.0) / (tf + norm)
+
+        self._term_ptr = term_ptr
+        self._doc_indices = doc_indices
+        self._bm25_vals = bm25_vals
+
+    def get_scores(self, query: list[str]) -> np.ndarray:
+        scores = np.zeros(self._n, dtype=np.float32)
+        for tok in query:
+            t = self._vocab.get(tok)
+            if t is None:
+                continue
+            idf = float(self._idf[t])
+            if idf <= 0:
+                continue
+            s, e = int(self._term_ptr[t]), int(self._term_ptr[t + 1])
+            if s == e:
+                continue
+            scores[self._doc_indices[s:e]] += idf * self._bm25_vals[s:e]
+        return scores
 
 
 class RAGStore:
@@ -18,29 +99,57 @@ class RAGStore:
         self._meta_path = STORE_DIR / "meta.json"
         self._vec_path = STORE_DIR / "vectors.npy"
         self._mtimes_path = STORE_DIR / "mtimes.json"
+        self._bodies_path = STORE_DIR / "bodies.json"
         self._model = None
         self._chunks: list[dict] = []
         self._vectors: Optional[np.ndarray] = None
-        self._bm25: Optional[BM25Okapi] = None
+        self._bm25: Optional[_SparseBM25] = None
         self._mtimes: dict[str, float] = {}
         self._load()
 
     def _load(self):
         if self._meta_path.exists():
             self._chunks = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        # Migrate old format: meta.json had 'body' in each chunk dict
+        if self._chunks and not self._bodies_path.exists() and "body" in self._chunks[0]:
+            bodies = [c.pop("body") for c in self._chunks]
+            self._bodies_path.write_text(
+                json.dumps(bodies, ensure_ascii=False), encoding="utf-8"
+            )
+            self._meta_path.write_text(
+                json.dumps(self._chunks, ensure_ascii=False), encoding="utf-8"
+            )
         if self._vec_path.exists() and self._chunks:
-            self._vectors = np.load(str(self._vec_path))
+            self._vectors = np.load(str(self._vec_path), mmap_mode="r")
         if self._mtimes_path.exists():
             self._mtimes = json.loads(self._mtimes_path.read_text(encoding="utf-8"))
         self._rebuild_bm25()
 
-    def _save(self):
+    def _load_bodies(self) -> list[str]:
+        if self._bodies_path.exists():
+            return json.loads(self._bodies_path.read_text(encoding="utf-8"))
+        return []
+
+    def load_bodies(self) -> list[str]:
+        """Public accessor for chunk bodies (positionally aligned with _chunks)."""
+        return self._load_bodies()
+
+    def _save(self, bodies: list[str]) -> None:
         self._meta_path.write_text(
             json.dumps(self._chunks, ensure_ascii=False, indent=None),
             encoding="utf-8",
         )
+        self._bodies_path.write_text(
+            json.dumps(bodies, ensure_ascii=False, indent=None),
+            encoding="utf-8",
+        )
         if self._vectors is not None:
-            np.save(str(self._vec_path), self._vectors)
+            vecs = (
+                np.array(self._vectors)
+                if isinstance(self._vectors, np.memmap)
+                else self._vectors
+            )
+            np.save(str(self._vec_path), vecs)
         elif self._vec_path.exists():
             self._vec_path.unlink()
         self._mtimes_path.write_text(
@@ -48,9 +157,20 @@ class RAGStore:
             encoding="utf-8",
         )
 
+    def _save_mtimes(self) -> None:
+        self._mtimes_path.write_text(
+            json.dumps(self._mtimes, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _reload_vectors_mmapped(self) -> None:
+        if self._vec_path.exists() and self._chunks:
+            self._vectors = np.load(str(self._vec_path), mmap_mode="r")
+
     def _rebuild_bm25(self):
         if self._chunks:
-            self._bm25 = BM25Okapi([c["body"].lower().split() for c in self._chunks])
+            bodies = self._load_bodies()
+            self._bm25 = _SparseBM25([b.lower().split() for b in bodies])
         else:
             self._bm25 = None
 
@@ -65,15 +185,28 @@ class RAGStore:
     def _embed(self, texts: list[str]) -> np.ndarray:
         return np.array(list(self.model.embed(texts)), dtype=np.float32)
 
+    @staticmethod
+    def _malloc_trim() -> None:
+        """Return fragmented heap pages to the OS (Linux only, no-op elsewhere)."""
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
     def ingest(
         self,
         chunks: list[dict],
         mtime: float | None = None,
-        batch_size: int = 64,
+        batch_size: int = int(os.environ.get("RAG_MCP_EMBED_BATCH_SIZE", "16")),
         log=None,
     ) -> int:
         if not chunks:
             return 0
+        # Release mmap before modifying vectors in-place
+        if isinstance(self._vectors, np.memmap):
+            self._vectors = np.array(self._vectors)
+        existing_bodies = self._load_bodies()
         total = 0
         total_batches = (len(chunks) + batch_size - 1) // batch_size
         for batch_number, i in enumerate(range(0, len(chunks), batch_size), 1):
@@ -81,14 +214,17 @@ class RAGStore:
             if log:
                 log(f"embedding batch {batch_number}/{total_batches} ({len(batch)} chunks)")
             new_vecs = self._embed([c["body"] for c in batch])
-            self._chunks.extend(batch)
+            batch_bodies = [c["body"] for c in batch]
+            batch_meta = [{k: v for k, v in c.items() if k != "body"} for c in batch]
+            self._chunks.extend(batch_meta)
+            existing_bodies.extend(batch_bodies)
             self._vectors = (
                 new_vecs
                 if self._vectors is None
                 else np.vstack([self._vectors, new_vecs])
             )
             total += len(batch)
-            self._save()
+            self._save(bodies=existing_bodies)
             if log:
                 log(
                     f"saved batch {batch_number}/{total_batches} "
@@ -97,8 +233,10 @@ class RAGStore:
         if mtime is not None:
             for chunk in chunks:
                 self._mtimes[chunk["source"]] = mtime
-            self._save()
+            self._save_mtimes()
         self._rebuild_bm25()
+        self._reload_vectors_mmapped()
+        self._malloc_trim()
         return total
 
     def source_mtime(self, source: str) -> float | None:
@@ -107,15 +245,18 @@ class RAGStore:
     def delete_source(self, source: str) -> int:
         if not self._chunks:
             return 0
+        bodies = self._load_bodies()
         keep = [i for i, c in enumerate(self._chunks) if c["source"] != source]
         removed = len(self._chunks) - len(keep)
         if removed == 0:
             return 0
         self._chunks = [self._chunks[i] for i in keep]
+        new_bodies = [bodies[i] for i in keep] if bodies else []
         self._vectors = self._vectors[np.array(keep)] if keep else None
         self._mtimes.pop(source, None)
         self._rebuild_bm25()
-        self._save()
+        self._save(bodies=new_bodies)
+        self._reload_vectors_mmapped()
         return removed
 
     def list_sources(self) -> list[str]:
@@ -201,9 +342,12 @@ class RAGStore:
             top = expanded
         else:
             top = ranked[:n]
+
+        bodies = self._load_bodies()
         return [
             {
                 **self._chunks[i],
+                "body": bodies[i] if i < len(bodies) else "",
                 "score": float(rrf.get(i, 0.0)),
                 "match_type": match_types[i],
             }

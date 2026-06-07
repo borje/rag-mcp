@@ -141,7 +141,7 @@ def test_changed_file_triggers_reingest(tmp_path, monkeypatch):
 
     _ingest_files_root()
 
-    all_bodies = " ".join(c["body"] for c in fresh._chunks)
+    all_bodies = " ".join(fresh._load_bodies())
     assert "Updated version content" in all_bodies, (
         "Re-ingested content not found in store"
     )
