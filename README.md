@@ -66,6 +66,26 @@ docker compose up --build
 
 The image build and first embedding model download require internet. The server listens on `EXTERNAL_PORT` (`8001` by default in Docker Compose). Source files placed in `DATA_DIR` are served under `/files/`. The vector store lives in the `rag-store` Docker volume and the model cache lives in `rag-models`.
 
+Chunking can be tuned from Docker Compose or a `.env` file:
+
+```yaml
+environment:
+  BASE_URL: http://${FQDN:-localhost}:${EXTERNAL_PORT:-8001}
+  MD_CHUNK_MAX_CHARS: ${MD_CHUNK_MAX_CHARS:-1000}
+  MD_CHUNK_OVERLAP_CHARS: ${MD_CHUNK_OVERLAP_CHARS:-150}
+  MIN_CHUNK_BODY: ${MIN_CHUNK_BODY:-80}
+```
+
+Example `.env` override:
+
+```env
+MD_CHUNK_MAX_CHARS=600
+MD_CHUNK_OVERLAP_CHARS=100
+MIN_CHUNK_BODY=60
+```
+
+Chunking settings are tracked in the persisted store manifest. If chunking config or the embedding model changes, rag-mcp automatically clears the old index and rebuilds it from `FILES_ROOT` on the next startup or ingest.
+
 To build the Docker image fully offline after creating/copying `transfer/`, use:
 
 ```bash
@@ -156,3 +176,6 @@ bash transfer/install.sh
 | `RAG_MCP_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |
 | `RAG_MCP_WATCH_INTERVAL` | `30` | Seconds between auto-ingest polls (SSE/HTTP only). Set to `0` to disable. |
 | `RAG_MCP_ADJACENT_CHUNKS` | `1` | Adjacent chunks before/after each hit to include from the same source and section. Set to `0` to disable. |
+| `MD_CHUNK_MAX_CHARS` | `1000` | Maximum size of a markdown sub-chunk in characters. |
+| `MD_CHUNK_OVERLAP_CHARS` | `150` | Overlap to keep between adjacent markdown sub-chunks. Must be smaller than `MD_CHUNK_MAX_CHARS`. |
+| `MIN_CHUNK_BODY` | `80` | Drop chunks whose body is shorter than this many characters. |

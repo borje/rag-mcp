@@ -4,6 +4,7 @@ Tests marked "FAILS before fix" use source_mtime() / mtime= param that did not
 exist in the old code, or rely on re-ingest behaviour the old code lacked.
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -96,6 +97,42 @@ def test_mtime_persists_across_reload(tmp_path, monkeypatch):
 
     s2 = RAGStore()  # fresh instance reads from same tmp_path
     assert s2.source_mtime("/docs/api.md") == 42.0
+
+
+def test_store_resets_when_index_manifest_changes(tmp_path, monkeypatch):
+    """Chunk config / model changes must invalidate persisted vectors and mtimes."""
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    manifest_v1 = {
+        "index_schema_version": 1,
+        "chunker_version": 1,
+        "model": "test-model",
+        "chunk_config": {
+            "MD_CHUNK_MAX_CHARS": 1000,
+            "MD_CHUNK_OVERLAP_CHARS": 150,
+            "MIN_CHUNK_BODY": 80,
+        },
+    }
+    manifest_v2 = {
+        **manifest_v1,
+        "chunk_config": {**manifest_v1["chunk_config"], "MD_CHUNK_MAX_CHARS": 600},
+    }
+
+    monkeypatch.setattr(store_module, "current_index_manifest", lambda: manifest_v1)
+    s1 = RAGStore()
+    monkeypatch.setattr(
+        s1, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    s1.ingest(_chunks("/docs/api.md"), mtime=42.0)
+    assert len(s1._chunks) == 2
+
+    monkeypatch.setattr(store_module, "current_index_manifest", lambda: manifest_v2)
+    s2 = RAGStore()
+
+    assert s2._chunks == []
+    assert s2.source_mtime("/docs/api.md") is None
+    assert s2._vectors is None
+    assert s2.manifest_reset_reason is not None
+    assert json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8")) == manifest_v2
 
 
 # ── integration test: FAIL before fix ─────────────────────────────────────────
@@ -207,6 +244,60 @@ def test_deleted_file_chunks_removed_on_ingest(tmp_path, monkeypatch):
 
     assert len(fresh._chunks) == 0
     assert str(doc) in result.removed_sources
+
+
+def test_manifest_mismatch_forces_reingest_of_unchanged_file(tmp_path, monkeypatch):
+    """A chunk-config change must clear mtimes so startup re-ingests unchanged files."""
+    import server as server_module
+    from server import _ingest_files_root
+
+    files_root = tmp_path / "files"
+    files_root.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    doc = files_root / "api.md"
+    doc.write_text("# API\n\n" + "Content. " * 20)
+
+    manifest_v1 = {
+        "index_schema_version": 1,
+        "chunker_version": 1,
+        "model": "test-model",
+        "chunk_config": {
+            "MD_CHUNK_MAX_CHARS": 1000,
+            "MD_CHUNK_OVERLAP_CHARS": 150,
+            "MIN_CHUNK_BODY": 80,
+        },
+    }
+    manifest_v2 = {
+        **manifest_v1,
+        "chunk_config": {**manifest_v1["chunk_config"], "MD_CHUNK_MAX_CHARS": 600},
+    }
+
+    monkeypatch.setattr(store_module, "STORE_DIR", store_dir)
+    monkeypatch.setattr(server_module, "FILES_ROOT", files_root)
+    monkeypatch.setattr(store_module, "current_index_manifest", lambda: manifest_v1)
+
+    first_store = RAGStore()
+    monkeypatch.setattr(
+        first_store, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    monkeypatch.setattr(server_module, "store", first_store)
+
+    first_result = _ingest_files_root()
+    assert first_result.total_files == 1
+
+    monkeypatch.setattr(store_module, "current_index_manifest", lambda: manifest_v2)
+    second_store = RAGStore()
+    monkeypatch.setattr(
+        second_store, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    monkeypatch.setattr(server_module, "store", second_store)
+
+    second_result = _ingest_files_root()
+
+    assert second_store.manifest_reset_reason is not None
+    assert second_result.total_files == 1
+    assert len(second_store._chunks) > 0
 
 
 # ── regression tests: PASS before AND after ───────────────────────────────────

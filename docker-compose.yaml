@@ -8,7 +8,10 @@ services:
       - rag-store:/store
       - rag-models:/models
     environment:
-      - BASE_URL=http://${FQDN:-localhost}:${EXTERNAL_PORT:-8001}
+      BASE_URL: http://${FQDN:-localhost}:${EXTERNAL_PORT:-8001}
+      MD_CHUNK_MAX_CHARS: ${MD_CHUNK_MAX_CHARS:-1000}
+      MD_CHUNK_OVERLAP_CHARS: ${MD_CHUNK_OVERLAP_CHARS:-150}
+      MIN_CHUNK_BODY: ${MIN_CHUNK_BODY:-80}
 
 volumes:
   rag-store:

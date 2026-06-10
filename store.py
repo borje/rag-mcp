@@ -7,8 +7,20 @@ from typing import Optional
 
 import numpy as np
 
+from chunkers import CHUNKER_VERSION, current_chunk_config
+
 STORE_DIR = Path(os.environ.get("RAG_MCP_DATA", Path.home() / ".local/share/rag-mcp"))
 MODEL_NAME = os.environ.get("RAG_MCP_MODEL", "BAAI/bge-small-en-v1.5")
+INDEX_SCHEMA_VERSION = 1
+
+
+def current_index_manifest() -> dict:
+    return {
+        "index_schema_version": INDEX_SCHEMA_VERSION,
+        "chunker_version": CHUNKER_VERSION,
+        "model": MODEL_NAME,
+        "chunk_config": current_chunk_config(),
+    }
 
 
 class _SparseBM25:
@@ -100,14 +112,57 @@ class RAGStore:
         self._vec_path = STORE_DIR / "vectors.npy"
         self._mtimes_path = STORE_DIR / "mtimes.json"
         self._bodies_path = STORE_DIR / "bodies.json"
+        self._manifest_path = STORE_DIR / "manifest.json"
         self._model = None
         self._chunks: list[dict] = []
         self._vectors: Optional[np.ndarray] = None
         self._bm25: Optional[_SparseBM25] = None
         self._mtimes: dict[str, float] = {}
+        self.manifest_reset_reason: str | None = None
         self._load()
 
+    def _persisted_paths(self) -> list[Path]:
+        return [
+            self._meta_path,
+            self._vec_path,
+            self._mtimes_path,
+            self._bodies_path,
+            self._manifest_path,
+        ]
+
+    def _has_persisted_store(self) -> bool:
+        return any(path.exists() for path in self._persisted_paths() if path != self._manifest_path)
+
+    def _load_manifest(self) -> dict | None:
+        if not self._manifest_path.exists():
+            return None
+        return json.loads(self._manifest_path.read_text(encoding="utf-8"))
+
+    def _save_manifest(self) -> None:
+        self._manifest_path.write_text(
+            json.dumps(current_index_manifest(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _reset_persisted_store(self, reason: str) -> None:
+        self.manifest_reset_reason = reason
+        self._chunks = []
+        self._vectors = None
+        self._bm25 = None
+        self._mtimes = {}
+        for path in self._persisted_paths():
+            if path.exists():
+                path.unlink()
+
     def _load(self):
+        saved_manifest = self._load_manifest()
+        expected_manifest = current_index_manifest()
+        if saved_manifest != expected_manifest:
+            if saved_manifest is not None or self._has_persisted_store():
+                self._reset_persisted_store(
+                    "index manifest mismatch; clearing persisted store so it can be rebuilt"
+                )
+            self._save_manifest()
         if self._meta_path.exists():
             self._chunks = json.loads(self._meta_path.read_text(encoding="utf-8"))
         # Migrate old format: meta.json had 'body' in each chunk dict
@@ -135,6 +190,7 @@ class RAGStore:
         return self._load_bodies()
 
     def _save(self, bodies: list[str]) -> None:
+        self._save_manifest()
         self._meta_path.write_text(
             json.dumps(self._chunks, ensure_ascii=False, indent=None),
             encoding="utf-8",
@@ -158,6 +214,7 @@ class RAGStore:
         )
 
     def _save_mtimes(self) -> None:
+        self._save_manifest()
         self._mtimes_path.write_text(
             json.dumps(self._mtimes, ensure_ascii=False),
             encoding="utf-8",

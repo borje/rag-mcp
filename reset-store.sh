@@ -9,7 +9,9 @@ mkdir -p "$STORE_DIR"
 rm -f \
   "$STORE_DIR/meta.json" \
   "$STORE_DIR/vectors.npy" \
-  "$STORE_DIR/mtimes.json"
+  "$STORE_DIR/mtimes.json" \
+  "$STORE_DIR/bodies.json" \
+  "$STORE_DIR/manifest.json"
 
 echo "    Store files removed."
 echo ""

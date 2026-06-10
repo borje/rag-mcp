@@ -1,6 +1,7 @@
 """Document chunkers: OpenAPI, Markdown, PDF, DOCX, plain text."""
 
 import json
+import os
 import re
 import uuid
 from pathlib import Path
@@ -105,8 +106,30 @@ def chunk_openapi(path: Path) -> Iterator[dict]:
 
 # ── Markdown ─────────────────────────────────────────────────────────────────
 
-_MD_MAX_CHARS = 1000
-_MD_OVERLAP_CHARS = 150
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.environ.get(name)
+    if raw in {None, ""}:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
+
+CHUNKER_VERSION = 1
+
+_MD_MAX_CHARS = _env_int("MD_CHUNK_MAX_CHARS", 1000, minimum=1)
+_MD_OVERLAP_CHARS = _env_int("MD_CHUNK_OVERLAP_CHARS", 150, minimum=0)
+if _MD_OVERLAP_CHARS >= _MD_MAX_CHARS:
+    raise ValueError(
+        "MD_CHUNK_OVERLAP_CHARS must be smaller than MD_CHUNK_MAX_CHARS, "
+        f"got overlap={_MD_OVERLAP_CHARS}, max={_MD_MAX_CHARS}"
+    )
 
 
 def _split_long_section(header: str, body: str) -> list[str]:
@@ -271,7 +294,15 @@ _EXT_MAP = {
 }
 
 
-_MIN_CHUNK_BODY = 80
+_MIN_CHUNK_BODY = _env_int("MIN_CHUNK_BODY", 80, minimum=0)
+
+
+def current_chunk_config() -> dict[str, int]:
+    return {
+        "MD_CHUNK_MAX_CHARS": _MD_MAX_CHARS,
+        "MD_CHUNK_OVERLAP_CHARS": _MD_OVERLAP_CHARS,
+        "MIN_CHUNK_BODY": _MIN_CHUNK_BODY,
+    }
 
 
 def chunk_file(path: Path) -> list[dict]:

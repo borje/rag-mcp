@@ -233,6 +233,9 @@ if __name__ == "__main__":
 
         def _startup_ingest():
             print(f"[startup] scanning {FILES_ROOT} for new documents…", flush=True)
+            if store.manifest_reset_reason:
+                print(f"[startup] {store.manifest_reset_reason}", flush=True)
+                store.manifest_reset_reason = None
             try:
                 result = _ingest_files_root(
                     lambda message: print(f"[startup] {message}", flush=True)
