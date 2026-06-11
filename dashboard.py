@@ -2,12 +2,15 @@
 
 import html
 from pathlib import Path
+from urllib.parse import quote
 
 
 def file_url(source: str, files_root: Path, base_url: str) -> str | None:
     try:
         rel = Path(source).relative_to(files_root)
-        return f"{base_url}/files/{rel}"
+        # Percent-encode so '#', '?', '%', spaces etc. in filenames don't
+        # truncate or corrupt the URL ('/' stays literal).
+        return f"{base_url}/files/{quote(str(rel))}"
     except ValueError:
         return None
 

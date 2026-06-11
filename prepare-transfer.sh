@@ -106,18 +106,21 @@ fi
 echo "==> Registering with Claude Code..."
 PYTHON_BIN="$INSTALL_DIR/.venv/bin/python"
 claude mcp remove rag-mcp 2>/dev/null || true
+DOCS_DIR="$HOME/rag-docs"
+mkdir -p "$DOCS_DIR"
 claude mcp add rag-mcp -s user \
   -e FASTEMBED_CACHE_PATH="$MODEL_DEST" \
   -e RAG_MCP_DATA="$HOME/.local/share/rag-mcp" \
+  -e FILES_ROOT="$DOCS_DIR" \
   -- "$PYTHON_BIN" "$INSTALL_DIR/server.py"
 
 echo ""
 echo "Done! Verify with: claude mcp list"
 echo ""
 echo "Usage in Claude Code:"
-echo "  ingest_file /path/to/api-spec.yaml"
-echo "  ingest_directory /path/to/docs"
-echo "  search 'how to authenticate'"
+echo "  1. Put documents (.md, .pdf, .docx, .yaml, .txt) in $DOCS_DIR"
+echo "  2. Run the 'ingest' tool to index them"
+echo "  3. Run the 'search' tool, e.g. search 'how to authenticate'"
 INSTALL_EOF
 chmod +x "$OUT_DIR/install.sh"
 

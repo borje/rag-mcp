@@ -11,7 +11,9 @@ rm -f \
   "$STORE_DIR/vectors.npy" \
   "$STORE_DIR/mtimes.json" \
   "$STORE_DIR/bodies.json" \
-  "$STORE_DIR/manifest.json"
+  "$STORE_DIR/manifest.json" \
+  "$STORE_DIR"/*.tmp \
+  "$STORE_DIR"/vectors.tmp.npy
 
 echo "    Store files removed."
 echo ""

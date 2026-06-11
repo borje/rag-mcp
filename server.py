@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
 import dashboard
-from chunkers import chunk_file
+from chunkers import SUPPORTED_EXTENSIONS, chunk_file
 from store import RAGStore
 
 store = RAGStore()
@@ -75,72 +75,78 @@ class IngestResult(BaseModel):
     total_files: int
     files: list[FileIngestResult]
     skipped_files: list[str]
+    failed_files: list[str] = []
     removed_sources: list[str]
 
 
 def _ingest_files_root(log=None) -> IngestResult:
     """Ingest supported files under FILES_ROOT and remove stale sources."""
-    supported = {
-        ".yaml",
-        ".yml",
-        ".json",
-        ".md",
-        ".markdown",
-        ".pdf",
-        ".docx",
-        ".txt",
-        ".rst",
-    }
     FILES_ROOT.mkdir(parents=True, exist_ok=True)
     removed_sources = _cleanup_stale_sources()
     files: list[FileIngestResult] = []
     skipped: list[str] = []
+    failed: list[str] = []
     candidates = [
         f
         for f in sorted(FILES_ROOT.glob("**/*"))
-        if f.is_file() and f.suffix.lower() in supported
+        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     if log:
         log(f"found {len(candidates)} supported file(s)")
     for i, f in enumerate(candidates, 1):
         label = f.relative_to(FILES_ROOT)
-        if not f.is_file() or f.suffix.lower() not in supported:
-            continue
-        current_mtime = f.stat().st_mtime
-        if store.source_mtime(str(f)) == current_mtime:
+        try:
+            current_mtime = f.stat().st_mtime
+            if store.source_mtime(str(f)) == current_mtime:
+                if log:
+                    log(f"[{i}/{len(candidates)}] unchanged {label}")
+                continue
+            # Always remove existing chunks for this source first: an ingest
+            # interrupted before the mtime was recorded leaves orphan chunks
+            # that would otherwise be duplicated by the re-ingest.
+            stale = store.delete_source(str(f))
+            if stale and log:
+                log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
             if log:
-                log(f"[{i}/{len(candidates)}] unchanged {label}")
-            continue
-        if store.source_mtime(str(f)) is not None:
+                log(f"[{i}/{len(candidates)}] chunking {label}")
+            chunks = chunk_file(f)
+            if chunks:
+                if log:
+                    log(
+                        f"[{i}/{len(candidates)}] embedding {label} "
+                        f"({len(chunks)} chunks)"
+                    )
+                n = store.ingest(
+                    chunks,
+                    mtime=current_mtime,
+                    log=(
+                        lambda message: log(
+                            f"[{i}/{len(candidates)}] {label}: {message}"
+                        )
+                    )
+                    if log
+                    else None,
+                )
+                if log:
+                    log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
+                files.append(FileIngestResult(file=f.name, chunks=n))
+            else:
+                if log:
+                    log(f"[{i}/{len(candidates)}] skipped {label} (no chunks extracted)")
+                skipped.append(f.name)
+        except Exception as e:
+            # One bad file must not abort the scan for the remaining files.
+            print(f"[ingest] failed {label}: {e}", file=sys.stderr, flush=True)
             if log:
-                log(f"[{i}/{len(candidates)}] changed {label}; removing old chunks")
-            store.delete_source(str(f))
-        if log:
-            log(f"[{i}/{len(candidates)}] chunking {label}")
-        chunks = chunk_file(f)
-        if chunks:
-            if log:
-                log(f"[{i}/{len(candidates)}] embedding {label} ({len(chunks)} chunks)")
-            n = store.ingest(
-                chunks,
-                mtime=current_mtime,
-                log=(lambda message: log(f"[{i}/{len(candidates)}] {label}: {message}"))
-                if log
-                else None,
-            )
-            if log:
-                log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
-            files.append(FileIngestResult(file=f.name, chunks=n))
-        else:
-            if log:
-                log(f"[{i}/{len(candidates)}] skipped {label} (no chunks extracted)")
-            skipped.append(f.name)
+                log(f"[{i}/{len(candidates)}] FAILED {label}: {e}")
+            failed.append(f.name)
 
     return IngestResult(
         total_chunks=sum(r.chunks for r in files),
         total_files=len(files),
         files=files,
         skipped_files=skipped,
+        failed_files=failed,
         removed_sources=removed_sources,
     )
 
@@ -205,7 +211,9 @@ def rag_status() -> StoreStatus:
 if __name__ == "__main__":
     import uvicorn
 
-    transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
+    # Default matches the documented Claude Code stdio setup; the Docker
+    # images set MCP_TRANSPORT=streamable-http explicitly.
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
     host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
     port = int(os.environ.get("FASTMCP_PORT", "8000"))
 
@@ -244,10 +252,13 @@ if __name__ == "__main__":
                     print(f"[startup] removed stale source {Path(s).name}", flush=True)
                 for name in result.skipped_files:
                     print(f"[startup] skipped {name} (no chunks extracted)", flush=True)
+                for name in result.failed_files:
+                    print(f"[startup] FAILED {name}", file=sys.stderr, flush=True)
                 if (
                     result.total_files == 0
                     and not result.removed_sources
                     and not result.skipped_files
+                    and not result.failed_files
                 ):
                     print("[startup] no new documents", flush=True)
                     return
@@ -267,7 +278,9 @@ if __name__ == "__main__":
         async def _watch_loop(interval: int) -> None:
             while True:
                 await asyncio.sleep(interval)
-                _startup_ingest()
+                # Off the event loop: a synchronous ingest (chunking + ONNX
+                # embedding) here would freeze every MCP/dashboard request.
+                await asyncio.to_thread(_startup_ingest)
 
         @asynccontextmanager
         async def lifespan(app):
@@ -276,7 +289,11 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 print("[startup] interrupted", flush=True)
             if WATCH_INTERVAL > 0:
-                asyncio.create_task(_watch_loop(WATCH_INTERVAL))
+                # Keep a strong reference: the event loop only holds weak
+                # refs to tasks, so an unreferenced task can be GC'd.
+                app.state.watch_task = asyncio.create_task(
+                    _watch_loop(WATCH_INTERVAL)
+                )
             if transport == "streamable-http":
                 async with mcp_app.router.lifespan_context(mcp_app):
                     yield

@@ -4,7 +4,7 @@ services:
     ports:
       - "${EXTERNAL_PORT:-8001}:8000"
     volumes:
-      - ${DATA_DIR}:/data
+      - ${DATA_DIR:-./data}:/data
       - rag-store:/store
       - rag-models:/models
     environment:
