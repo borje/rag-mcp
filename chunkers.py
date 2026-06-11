@@ -7,6 +7,11 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
+# Chunks with a body shorter than this are dropped by the chunkers BEFORE
+# chunk_index/chunk_total are assigned, so indices stay contiguous and
+# adjacent-chunk expansion in the store keeps working.
+_MIN_CHUNK_BODY = 80
+
 
 def _id() -> str:
     return str(uuid.uuid4())
@@ -40,9 +45,18 @@ def chunk_openapi(path: Path) -> Iterator[dict]:
     spec = (
         yaml.safe_load(text) if path.suffix in (".yaml", ".yml") else json.loads(text)
     )
+    if not isinstance(spec, dict):
+        return
 
-    title = spec.get("info", {}).get("title", path.stem)
-    base = spec.get("servers", [{}])[0].get("url", "") or spec.get("host", "")
+    info = spec.get("info") or {}
+    title = info.get("title", path.stem) if isinstance(info, dict) else path.stem
+    servers = spec.get("servers") or []
+    first_server = (
+        servers[0]
+        if isinstance(servers, list) and servers and isinstance(servers[0], dict)
+        else {}
+    )
+    base = first_server.get("url", "") or spec.get("host", "")
 
     operations = []
     for path_str, methods in (spec.get("paths") or {}).items():
@@ -53,8 +67,8 @@ def chunk_openapi(path: Path) -> Iterator[dict]:
                 continue
             operations.append((path_str, method, op))
 
-    total = len(operations)
-    for idx, (path_str, method, op) in enumerate(operations):
+    entries: list[tuple[str, str]] = []
+    for path_str, method, op in operations:
         summary = op.get("summary") or op.get("operationId") or ""
         description = op.get("description") or ""
         params = op.get("parameters") or []
@@ -93,14 +107,19 @@ def chunk_openapi(path: Path) -> Iterator[dict]:
             ]
             lines.append("Responses:\n" + "\n".join(rlines))
 
+        entries.append((f"{method.upper()} {path_str}", "\n".join(lines)))
+
+    entries = [(t, b) for t, b in entries if len(b) >= _MIN_CHUNK_BODY]
+    total = len(entries)
+    for idx, (op_title, body) in enumerate(entries):
         yield {
             "id": _id(),
             "source": str(path),
-            **_meta(path, f"{method.upper()} {path_str}", idx, total),
+            **_meta(path, op_title, idx, total),
             "doc_title": title,
             "chunk_type": "endpoint",
-            "title": f"{method.upper()} {path_str}",
-            "body": "\n".join(lines),
+            "title": op_title,
+            "body": body,
         }
 
 
@@ -170,10 +189,30 @@ def _split_long_section(header: str, body: str) -> list[str]:
     return result or [prefix + "\n\n".join(paras)]
 
 
+def _split_md_sections(text: str) -> list[str]:
+    """Split on #/##/### headings at line start, ignoring fenced code blocks.
+
+    A naive regex split treats '# comment' lines inside ``` fences as
+    section boundaries, producing bogus titles and broken adjacency keys.
+    """
+    sections: list[list[str]] = [[]]
+    in_fence = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            sections[-1].append(line)
+            continue
+        if not in_fence and re.match(r"#{1,3} ", line):
+            sections.append([line])
+        else:
+            sections[-1].append(line)
+    return ["".join(s) for s in sections if s]
+
+
 def chunk_markdown(path: Path) -> Iterator[dict]:
     text = path.read_text(encoding="utf-8")
-    sections = re.split(r"(?m)^(?=#{1,3} )", text)
-    for section in sections:
+    for section in _split_md_sections(text):
         section = section.strip()
         if not section:
             continue
@@ -183,7 +222,11 @@ def chunk_markdown(path: Path) -> Iterator[dict]:
         title = title_m.group(1).strip() if title_m else path.stem
         body_text = section[len(header_line) :].strip() if header_line else section
 
-        sub_chunks = _split_long_section(header_line, body_text)
+        sub_chunks = [
+            c
+            for c in _split_long_section(header_line, body_text)
+            if len(c) >= _MIN_CHUNK_BODY
+        ]
         total = len(sub_chunks)
         for idx, chunk_body in enumerate(sub_chunks):
             yield {
@@ -207,7 +250,7 @@ def chunk_pdf(path: Path) -> Iterator[dict]:
     pages = []
     for i, page in enumerate(doc):
         text = page.get_text().strip()
-        if text:
+        if len(text) >= _MIN_CHUNK_BODY:
             pages.append((i, text))
     total = len(pages)
     for idx, (page_index, text) in enumerate(pages):
@@ -227,8 +270,25 @@ def chunk_pdf(path: Path) -> Iterator[dict]:
 # ── DOCX ──────────────────────────────────────────────────────────────────────
 
 
+def _docx_blocks(doc):
+    """Yield Paragraph and Table objects in document order.
+
+    doc.paragraphs alone skips all table-cell text, silently dropping
+    tabular content from the index.
+    """
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith("}p"):
+            yield Paragraph(child, doc)
+        elif child.tag.endswith("}tbl"):
+            yield Table(child, doc)
+
+
 def chunk_docx(path: Path) -> Iterator[dict]:
     from docx import Document
+    from docx.text.paragraph import Paragraph
 
     doc = Document(str(path))
     heading = path.stem
@@ -239,15 +299,22 @@ def chunk_docx(path: Path) -> Iterator[dict]:
         if paras:
             sections.append((heading, "\n".join(paras)))
 
-    for para in doc.paragraphs:
-        if para.style.name.startswith("Heading"):
-            flush()
-            paras.clear()
-            heading = para.text or heading
-        elif para.text.strip():
-            paras.append(para.text)
+    for block in _docx_blocks(doc):
+        if isinstance(block, Paragraph):
+            if block.style.name.startswith("Heading"):
+                flush()
+                paras.clear()
+                heading = block.text or heading
+            elif block.text.strip():
+                paras.append(block.text)
+        else:  # Table
+            for row in block.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    paras.append(" | ".join(cells))
 
     flush()
+    sections = [(h, b) for h, b in sections if len(b) >= _MIN_CHUNK_BODY]
     total = len(sections)
     for idx, (section_heading, body) in enumerate(sections):
         yield {
@@ -266,7 +333,11 @@ def chunk_docx(path: Path) -> Iterator[dict]:
 
 def chunk_text(path: Path) -> Iterator[dict]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    paragraphs = [
+        p.strip()
+        for p in re.split(r"\n\s*\n", text)
+        if len(p.strip()) >= _MIN_CHUNK_BODY
+    ]
     total = len(paragraphs)
     for i, para in enumerate(paragraphs):
         yield {
@@ -293,6 +364,8 @@ _EXT_MAP = {
     ".rst": chunk_text,
 }
 
+# Single source of truth for the directory scanner in server.py.
+SUPPORTED_EXTENSIONS = frozenset(_EXT_MAP) | {".json"}
 
 _MIN_CHUNK_BODY = _env_int("MIN_CHUNK_BODY", 80, minimum=0)
 
@@ -305,21 +378,27 @@ def current_chunk_config() -> dict[str, int]:
     }
 
 
+def _looks_like_openapi(data) -> bool:
+    return isinstance(data, dict) and isinstance(data.get("paths"), dict)
+
+
 def chunk_file(path: Path) -> list[dict]:
     path = Path(path)
     ext = path.suffix.lower()
 
-    if ext == ".json":
+    if ext in (".json", ".yaml", ".yml"):
+        # Sniff content: OpenAPI specs get endpoint chunks, anything else
+        # (configs, data files, malformed specs) falls back to plain text.
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if "paths" in data and isinstance(data["paths"], dict):
-                raw = list(chunk_openapi(path))
-            else:
-                raw = list(chunk_text(path))
-        except Exception:
-            raw = list(chunk_text(path))
-    else:
-        fn = _EXT_MAP.get(ext)
-        raw = list(fn(path)) if fn else []
+            import yaml
 
-    return [c for c in raw if len(c.get("body", "")) >= _MIN_CHUNK_BODY]
+            text = path.read_text(encoding="utf-8")
+            data = json.loads(text) if ext == ".json" else yaml.safe_load(text)
+            if _looks_like_openapi(data):
+                return list(chunk_openapi(path))
+            return list(chunk_text(path))
+        except Exception:
+            return list(chunk_text(path))
+
+    fn = _EXT_MAP.get(ext)
+    return list(fn(path)) if fn else []

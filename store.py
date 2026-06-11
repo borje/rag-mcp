@@ -2,6 +2,8 @@
 
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +36,11 @@ class _SparseBM25:
     def __init__(self, corpus: list[list[str]], k1: float = 1.5, b: float = 0.75):
         n = len(corpus)
         self._n = n
+        self._vocab: dict[str, int] = {}
+        self._idf = np.zeros(0, dtype=np.float32)
+        self._term_ptr = np.zeros(1, dtype=np.int32)
+        self._doc_indices = np.zeros(0, dtype=np.int32)
+        self._bm25_vals = np.zeros(0, dtype=np.float32)
         if n == 0:
             return
 
@@ -72,7 +79,7 @@ class _SparseBM25:
         # _term_ptr[t]:_term_ptr[t+1] → slice of _doc_indices / _bm25_vals for term t.
         term_ptr = np.zeros(V + 1, dtype=np.int32)
         for t in range(V):
-            term_ptr[t + 1] = term_ptr[t] + len(posting.get(t, []))
+            term_ptr[t + 1] = term_ptr[t] + len(posting[t])
         nnz = int(term_ptr[-1])
 
         doc_indices = np.zeros(nnz, dtype=np.int32)
@@ -80,7 +87,7 @@ class _SparseBM25:
 
         for t in range(V):
             start = int(term_ptr[t])
-            for i, (d, tf) in enumerate(posting.get(t, [])):
+            for i, (d, tf) in enumerate(posting[t]):
                 norm = k1 * (1.0 - b + b * float(doc_lens[d]) / avgdl)
                 doc_indices[start + i] = d
                 bm25_vals[start + i] = tf * (k1 + 1.0) / (tf + norm)
@@ -96,13 +103,20 @@ class _SparseBM25:
             if t is None:
                 continue
             idf = float(self._idf[t])
-            if idf <= 0:
-                continue
             s, e = int(self._term_ptr[t]), int(self._term_ptr[t + 1])
-            if s == e:
-                continue
             scores[self._doc_indices[s:e]] += idf * self._bm25_vals[s:e]
         return scores
+
+
+def _backfill_meta(chunk: dict) -> dict:
+    """Fill metadata keys that pre-adjacent-chunk stores/callers lack."""
+    chunk.setdefault("source_name", Path(chunk.get("source", "")).name)
+    chunk.setdefault("section_path", chunk.get("title", ""))
+    chunk.setdefault("chunk_index", 0)
+    chunk.setdefault("chunk_total", 1)
+    chunk.setdefault("page_start", None)
+    chunk.setdefault("page_end", None)
+    return chunk
 
 
 class RAGStore:
@@ -115,10 +129,13 @@ class RAGStore:
         self._manifest_path = STORE_DIR / "manifest.json"
         self._model = None
         self._chunks: list[dict] = []
+        self._bodies: list[str] = []
         self._vectors: Optional[np.ndarray] = None
+        self._norms: Optional[np.ndarray] = None
         self._bm25: Optional[_SparseBM25] = None
         self._mtimes: dict[str, float] = {}
         self.manifest_reset_reason: str | None = None
+        self._write_lock = threading.Lock()
         self._load()
 
     def _persisted_paths(self) -> list[Path]:
@@ -136,23 +153,41 @@ class RAGStore:
     def _load_manifest(self) -> dict | None:
         if not self._manifest_path.exists():
             return None
-        return json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        return self._read_json(self._manifest_path, None)
 
     def _save_manifest(self) -> None:
-        self._manifest_path.write_text(
+        self._write_atomic(
+            self._manifest_path,
             json.dumps(current_index_manifest(), ensure_ascii=False),
-            encoding="utf-8",
         )
 
     def _reset_persisted_store(self, reason: str) -> None:
         self.manifest_reset_reason = reason
         self._chunks = []
+        self._bodies = []
         self._vectors = None
         self._bm25 = None
         self._mtimes = {}
         for path in self._persisted_paths():
             if path.exists():
                 path.unlink()
+
+    @staticmethod
+    def _write_atomic(path: Path, text: str) -> None:
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _read_json(path: Path, default):
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[store] could not read {path.name}: {e}", file=sys.stderr)
+            return default
+
 
     def _load(self):
         saved_manifest = self._load_manifest()
@@ -163,41 +198,76 @@ class RAGStore:
                     "index manifest mismatch; clearing persisted store so it can be rebuilt"
                 )
             self._save_manifest()
-        if self._meta_path.exists():
-            self._chunks = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        self._chunks = self._read_json(self._meta_path, [])
         # Migrate old format: meta.json had 'body' in each chunk dict
         if self._chunks and not self._bodies_path.exists() and "body" in self._chunks[0]:
-            bodies = [c.pop("body") for c in self._chunks]
-            self._bodies_path.write_text(
-                json.dumps(bodies, ensure_ascii=False), encoding="utf-8"
+            self._bodies = [c.pop("body", "") for c in self._chunks]
+            self._write_atomic(
+                self._bodies_path, json.dumps(self._bodies, ensure_ascii=False)
             )
-            self._meta_path.write_text(
-                json.dumps(self._chunks, ensure_ascii=False), encoding="utf-8"
+            self._write_atomic(
+                self._meta_path, json.dumps(self._chunks, ensure_ascii=False)
             )
+        elif self._chunks:
+            self._bodies = self._read_json(self._bodies_path, [])
+        else:
+            self._bodies = []
+        for c in self._chunks:
+            _backfill_meta(c)
         if self._vec_path.exists() and self._chunks:
-            self._vectors = np.load(str(self._vec_path), mmap_mode="r")
+            try:
+                self._vectors = np.load(str(self._vec_path), mmap_mode="r")
+            except (OSError, ValueError) as e:
+                print(f"[store] could not read vectors.npy: {e}", file=sys.stderr)
+                self._vectors = None
         if self._mtimes_path.exists():
-            self._mtimes = json.loads(self._mtimes_path.read_text(encoding="utf-8"))
+            self._mtimes = self._read_json(self._mtimes_path, {})
+        self._validate_alignment()
         self._rebuild_bm25()
 
+    def _validate_alignment(self) -> None:
+        """Trim chunks/bodies/vectors to a consistent common length.
+
+        A crash between the individual file writes (or an external partial
+        wipe) can leave the three artifacts at different lengths; positional
+        misalignment silently attributes the wrong body/vector to a chunk.
+        """
+        sizes = [len(self._chunks), len(self._bodies)]
+        if self._vectors is not None:
+            sizes.append(int(self._vectors.shape[0]))
+        m = min(sizes)
+        if any(s != m for s in sizes):
+            print(
+                f"[store] inconsistent store files "
+                f"(chunks={len(self._chunks)}, bodies={len(self._bodies)}, "
+                f"vectors={sizes[2] if len(sizes) > 2 else 'absent'}); "
+                f"truncating to {m} — re-run ingest to restore",
+                file=sys.stderr,
+            )
+            self._chunks = self._chunks[:m]
+            self._bodies = self._bodies[:m]
+            if self._vectors is not None:
+                self._vectors = np.array(self._vectors[:m]) if m else None
+            self._norms = None
+            # Drop all mtimes so the next ingest scan re-ingests the trimmed
+            # sources instead of skipping them as "unchanged".
+            self._mtimes = {}
+            self._save()
+
     def _load_bodies(self) -> list[str]:
-        if self._bodies_path.exists():
-            return json.loads(self._bodies_path.read_text(encoding="utf-8"))
-        return []
+        return self._read_json(self._bodies_path, [])
 
     def load_bodies(self) -> list[str]:
         """Public accessor for chunk bodies (positionally aligned with _chunks)."""
-        return self._load_bodies()
+        return self._bodies
 
-    def _save(self, bodies: list[str]) -> None:
+    def _save(self) -> None:
         self._save_manifest()
-        self._meta_path.write_text(
-            json.dumps(self._chunks, ensure_ascii=False, indent=None),
-            encoding="utf-8",
+        self._write_atomic(
+            self._meta_path, json.dumps(self._chunks, ensure_ascii=False)
         )
-        self._bodies_path.write_text(
-            json.dumps(bodies, ensure_ascii=False, indent=None),
-            encoding="utf-8",
+        self._write_atomic(
+            self._bodies_path, json.dumps(self._bodies, ensure_ascii=False)
         )
         if self._vectors is not None:
             vecs = (
@@ -205,19 +275,16 @@ class RAGStore:
                 if isinstance(self._vectors, np.memmap)
                 else self._vectors
             )
-            np.save(str(self._vec_path), vecs)
+            tmp = self._vec_path.parent / "vectors.tmp.npy"
+            np.save(str(tmp), vecs)
+            os.replace(tmp, self._vec_path)
         elif self._vec_path.exists():
             self._vec_path.unlink()
-        self._mtimes_path.write_text(
-            json.dumps(self._mtimes, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        self._save_mtimes()
 
     def _save_mtimes(self) -> None:
-        self._save_manifest()
-        self._mtimes_path.write_text(
-            json.dumps(self._mtimes, ensure_ascii=False),
-            encoding="utf-8",
+        self._write_atomic(
+            self._mtimes_path, json.dumps(self._mtimes, ensure_ascii=False)
         )
 
     def _reload_vectors_mmapped(self) -> None:
@@ -225,9 +292,8 @@ class RAGStore:
             self._vectors = np.load(str(self._vec_path), mmap_mode="r")
 
     def _rebuild_bm25(self):
-        if self._chunks:
-            bodies = self._load_bodies()
-            self._bm25 = _SparseBM25([b.lower().split() for b in bodies])
+        if self._bodies:
+            self._bm25 = _SparseBM25([b.lower().split() for b in self._bodies])
         else:
             self._bm25 = None
 
@@ -255,65 +321,76 @@ class RAGStore:
         self,
         chunks: list[dict],
         mtime: float | None = None,
-        batch_size: int = int(os.environ.get("RAG_MCP_EMBED_BATCH_SIZE", "16")),
+        batch_size: int | None = None,
         log=None,
     ) -> int:
         if not chunks:
             return 0
-        # Release mmap before modifying vectors in-place
-        if isinstance(self._vectors, np.memmap):
-            self._vectors = np.array(self._vectors)
-        existing_bodies = self._load_bodies()
-        total = 0
-        total_batches = (len(chunks) + batch_size - 1) // batch_size
-        for batch_number, i in enumerate(range(0, len(chunks), batch_size), 1):
-            batch = chunks[i : i + batch_size]
-            if log:
-                log(f"embedding batch {batch_number}/{total_batches} ({len(batch)} chunks)")
-            new_vecs = self._embed([c["body"] for c in batch])
-            batch_bodies = [c["body"] for c in batch]
-            batch_meta = [{k: v for k, v in c.items() if k != "body"} for c in batch]
-            self._chunks.extend(batch_meta)
-            existing_bodies.extend(batch_bodies)
+        if batch_size is None:
+            batch_size = int(os.environ.get("RAG_MCP_EMBED_BATCH_SIZE", "16"))
+        with self._write_lock:
+            new_meta: list[dict] = []
+            new_bodies: list[str] = []
+            vec_blocks: list[np.ndarray] = []
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+            for batch_number, i in enumerate(range(0, len(chunks), batch_size), 1):
+                batch = chunks[i : i + batch_size]
+                if log:
+                    log(
+                        f"embedding batch {batch_number}/{total_batches} "
+                        f"({len(batch)} chunks)"
+                    )
+                vec_blocks.append(self._embed([c["body"] for c in batch]))
+                new_bodies.extend(c["body"] for c in batch)
+                new_meta.extend(
+                    _backfill_meta({k: v for k, v in c.items() if k != "body"})
+                    for c in batch
+                )
+            new_vecs = np.vstack(vec_blocks)
+            # Rebind (don't mutate in place) so concurrent readers see either
+            # the old or the new state, never a partially-extended one.
+            self._chunks = self._chunks + new_meta
+            self._bodies = self._bodies + new_bodies
             self._vectors = (
                 new_vecs
                 if self._vectors is None
-                else np.vstack([self._vectors, new_vecs])
+                else np.vstack([np.array(self._vectors), new_vecs])
             )
-            total += len(batch)
-            self._save(bodies=existing_bodies)
+            self._norms = None
+            if mtime is not None:
+                for chunk in chunks:
+                    self._mtimes[chunk["source"]] = mtime
+            self._save()
             if log:
-                log(
-                    f"saved batch {batch_number}/{total_batches} "
-                    f"({total}/{len(chunks)} chunks)"
-                )
-        if mtime is not None:
-            for chunk in chunks:
-                self._mtimes[chunk["source"]] = mtime
-            self._save_mtimes()
-        self._rebuild_bm25()
-        self._reload_vectors_mmapped()
+                log(f"saved {len(chunks)} chunks")
+            self._rebuild_bm25()
+            self._reload_vectors_mmapped()
         self._malloc_trim()
-        return total
+        return len(chunks)
 
     def source_mtime(self, source: str) -> float | None:
         return self._mtimes.get(source)
 
     def delete_source(self, source: str) -> int:
-        if not self._chunks:
-            return 0
-        bodies = self._load_bodies()
-        keep = [i for i, c in enumerate(self._chunks) if c["source"] != source]
-        removed = len(self._chunks) - len(keep)
-        if removed == 0:
-            return 0
-        self._chunks = [self._chunks[i] for i in keep]
-        new_bodies = [bodies[i] for i in keep] if bodies else []
-        self._vectors = self._vectors[np.array(keep)] if keep else None
-        self._mtimes.pop(source, None)
-        self._rebuild_bm25()
-        self._save(bodies=new_bodies)
-        self._reload_vectors_mmapped()
+        with self._write_lock:
+            if not self._chunks:
+                return 0
+            keep = [i for i, c in enumerate(self._chunks) if c["source"] != source]
+            removed = len(self._chunks) - len(keep)
+            if removed == 0:
+                return 0
+            self._chunks = [self._chunks[i] for i in keep]
+            self._bodies = [
+                self._bodies[i] if i < len(self._bodies) else "" for i in keep
+            ]
+            self._vectors = (
+                np.array(self._vectors)[np.array(keep)] if keep else None
+            )
+            self._norms = None
+            self._mtimes.pop(source, None)
+            self._save()
+            self._rebuild_bm25()
+            self._reload_vectors_mmapped()
         return removed
 
     def list_sources(self) -> list[str]:
@@ -328,63 +405,74 @@ class RAGStore:
         }
 
     def search(self, query: str, n: int = 8) -> list[dict]:
-        if not self._chunks or self._vectors is None:
+        # Snapshot references so a concurrent ingest/delete (which rebinds,
+        # never mutates) cannot change them mid-search.
+        chunks = self._chunks
+        vectors = self._vectors
+        bodies = self._bodies
+        bm25 = self._bm25
+        if n <= 0 or not chunks or vectors is None:
             return []
-        n = min(n, len(self._chunks))
-        pool = min(n * 4, len(self._chunks))
+        n = min(n, len(chunks))
+        pool = min(n * 4, len(chunks))
         adjacent = max(0, int(os.environ.get("RAG_MCP_ADJACENT_CHUNKS", "1")))
 
         # Cosine similarity (vector search)
         q = self._embed([query])[0]
-        dot = self._vectors @ q
-        norms = np.linalg.norm(self._vectors, axis=1) * np.linalg.norm(q)
+        dot = vectors @ q
+        if self._norms is None or len(self._norms) != vectors.shape[0]:
+            self._norms = np.linalg.norm(vectors, axis=1)
+        norms = self._norms * np.linalg.norm(q)
         norms = np.where(norms < 1e-10, 1e-10, norms)
         cos_sims = dot / norms
         vec_ranks = np.argsort(-cos_sims)[:pool]
 
         # BM25 keyword search
-        bm25_scores = self._bm25.get_scores(query.lower().split())
+        if bm25 is not None:
+            bm25_scores = bm25.get_scores(query.lower().split())
+        else:
+            bm25_scores = np.zeros(len(chunks), dtype=np.float32)
         bm25_ranks = np.argsort(-bm25_scores)[:pool]
 
         # Reciprocal Rank Fusion (k=60)
         k = 60
         rrf: dict[int, float] = {}
         for rank, idx in enumerate(vec_ranks):
-            rrf[int(idx)] = rrf.get(int(idx), 0.0) + 1.0 / (k + rank + 1)
+            if int(idx) < len(chunks):
+                rrf[int(idx)] = rrf.get(int(idx), 0.0) + 1.0 / (k + rank + 1)
         for rank, idx in enumerate(bm25_ranks):
-            rrf[int(idx)] = rrf.get(int(idx), 0.0) + 1.0 / (k + rank + 1)
+            if int(idx) < len(chunks):
+                rrf[int(idx)] = rrf.get(int(idx), 0.0) + 1.0 / (k + rank + 1)
 
         ranked = sorted(rrf, key=lambda i: -rrf[i])
         match_types = {idx: "hit" for idx in ranked}
+
+        def _neighbor(idx: int, offset: int) -> int | None:
+            """Adjacent chunk by store position, validated by metadata.
+
+            Chunks of one section are stored contiguously, so position-based
+            lookup cannot confuse two same-titled sections the way a
+            (source, section_path, chunk_index) key can.
+            """
+            j = idx + offset
+            if 0 <= j < len(chunks):
+                a, b = chunks[idx], chunks[j]
+                if (
+                    b.get("source") == a.get("source")
+                    and b.get("section_path") == a.get("section_path")
+                    and b.get("chunk_index") == a.get("chunk_index", 0) + offset
+                ):
+                    return j
+            return None
+
         if adjacent:
-            by_location = {
-                (c["source"], c["section_path"], c["chunk_index"]): i
-                for i, c in enumerate(self._chunks)
-            }
             expanded: list[int] = []
             seen: set[int] = set()
             for idx in ranked:
-                chunk = self._chunks[idx]
                 candidates = [idx]
                 for offset in range(1, adjacent + 1):
-                    candidates.append(
-                        by_location.get(
-                            (
-                                chunk["source"],
-                                chunk["section_path"],
-                                chunk["chunk_index"] - offset,
-                            )
-                        )
-                    )
-                    candidates.append(
-                        by_location.get(
-                            (
-                                chunk["source"],
-                                chunk["section_path"],
-                                chunk["chunk_index"] + offset,
-                            )
-                        )
-                    )
+                    candidates.append(_neighbor(idx, -offset))
+                    candidates.append(_neighbor(idx, offset))
                 for candidate in candidates:
                     if candidate is None or candidate in seen:
                         continue
@@ -400,10 +488,9 @@ class RAGStore:
         else:
             top = ranked[:n]
 
-        bodies = self._load_bodies()
         return [
             {
-                **self._chunks[i],
+                **chunks[i],
                 "body": bodies[i] if i < len(bodies) else "",
                 "score": float(rrf.get(i, 0.0)),
                 "match_type": match_types[i],

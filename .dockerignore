@@ -1,0 +1,14 @@
+# Keep the build context small: this checkout carries multi-hundred-MB
+# venvs, archives, and data dirs that no Dockerfile COPYs.
+# NOTE: transfer/ must stay included — Dockerfile.offline COPYs
+# transfer/wheels, transfer/src, and transfer/models.
+.git
+.venv*
+__pycache__
+*.pyc
+data
+*.tgz
+*.tar
+tests
+.pytest_cache
+.claude
