@@ -61,8 +61,6 @@ class SearchResult(BaseModel):
     section_path: str
     chunk_index: int
     chunk_total: int
-    page_start: int | None
-    page_end: int | None
     file_url: str | None
     score: float
     match_type: str
@@ -207,8 +205,6 @@ def search(
             section_path=r["section_path"],
             chunk_index=r["chunk_index"],
             chunk_total=r["chunk_total"],
-            page_start=r["page_start"],
-            page_end=r["page_end"],
             file_url=_file_url(r["source"]),
             score=r["score"],
             match_type=r["match_type"],

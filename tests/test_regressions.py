@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import store as store_module
-from chunkers import chunk_docx, chunk_file, chunk_markdown, chunk_text
+from chunkers import chunk_file, chunk_markdown, chunk_text
 from store import RAGStore
 
 
@@ -277,25 +277,6 @@ def test_short_paragraph_filtered_before_indexing(tmp_path):
         "min-length filter must run before chunk_index assignment"
     )
     assert {c["chunk_total"] for c in chunks} == {2}
-
-
-def test_docx_table_content_is_indexed(tmp_path):
-    docx = pytest.importorskip("docx")
-
-    doc = docx.Document()
-    doc.add_heading("Parameters", level=1)
-    table = doc.add_table(rows=2, cols=2)
-    table.cell(0, 0).text = "name"
-    table.cell(0, 1).text = "description"
-    table.cell(1, 0).text = "timeout_seconds"
-    table.cell(1, 1).text = "How long to wait before aborting the request entirely"
-    path = tmp_path / "spec.docx"
-    doc.save(str(path))
-
-    chunks = list(chunk_docx(path))
-
-    joined = " ".join(c["body"] for c in chunks)
-    assert "timeout_seconds" in joined, "table cell text missing from chunks"
 
 
 # ── server: per-file isolation and orphan handling ───────────────────────────

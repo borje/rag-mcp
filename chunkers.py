@@ -1,4 +1,4 @@
-"""Document chunkers: OpenAPI, Markdown, PDF, DOCX, plain text."""
+"""Document chunkers: OpenAPI, Markdown, plain text."""
 
 import json
 import os
@@ -22,16 +22,12 @@ def _meta(
     section_path: str,
     chunk_index: int,
     chunk_total: int,
-    page_start: int | None = None,
-    page_end: int | None = None,
 ) -> dict:
     return {
         "source_name": path.name,
         "section_path": section_path,
         "chunk_index": chunk_index,
         "chunk_total": chunk_total,
-        "page_start": page_start,
-        "page_end": page_end,
     }
 
 
@@ -240,94 +236,6 @@ def chunk_markdown(path: Path) -> Iterator[dict]:
             }
 
 
-# ── PDF ───────────────────────────────────────────────────────────────────────
-
-
-def chunk_pdf(path: Path) -> Iterator[dict]:
-    import fitz  # pymupdf
-
-    doc = fitz.open(str(path))
-    pages = []
-    for i, page in enumerate(doc):
-        text = page.get_text().strip()
-        if len(text) >= _MIN_CHUNK_BODY:
-            pages.append((i, text))
-    total = len(pages)
-    for idx, (page_index, text) in enumerate(pages):
-        page_number = page_index + 1
-        yield {
-            "id": _id(),
-            "source": str(path),
-            **_meta(path, path.stem, idx, total, page_number, page_number),
-            "doc_title": path.stem,
-            "chunk_type": "page",
-            "title": f"{path.stem} p.{page_number}",
-            "body": text,
-        }
-    doc.close()
-
-
-# ── DOCX ──────────────────────────────────────────────────────────────────────
-
-
-def _docx_blocks(doc):
-    """Yield Paragraph and Table objects in document order.
-
-    doc.paragraphs alone skips all table-cell text, silently dropping
-    tabular content from the index.
-    """
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-
-    for child in doc.element.body.iterchildren():
-        if child.tag.endswith("}p"):
-            yield Paragraph(child, doc)
-        elif child.tag.endswith("}tbl"):
-            yield Table(child, doc)
-
-
-def chunk_docx(path: Path) -> Iterator[dict]:
-    from docx import Document
-    from docx.text.paragraph import Paragraph
-
-    doc = Document(str(path))
-    heading = path.stem
-    paras: list[str] = []
-    sections: list[tuple[str, str]] = []
-
-    def flush():
-        if paras:
-            sections.append((heading, "\n".join(paras)))
-
-    for block in _docx_blocks(doc):
-        if isinstance(block, Paragraph):
-            if block.style.name.startswith("Heading"):
-                flush()
-                paras.clear()
-                heading = block.text or heading
-            elif block.text.strip():
-                paras.append(block.text)
-        else:  # Table
-            for row in block.rows:
-                cells = [c.text.strip() for c in row.cells]
-                if any(cells):
-                    paras.append(" | ".join(cells))
-
-    flush()
-    sections = [(h, b) for h, b in sections if len(b) >= _MIN_CHUNK_BODY]
-    total = len(sections)
-    for idx, (section_heading, body) in enumerate(sections):
-        yield {
-            "id": _id(),
-            "source": str(path),
-            **_meta(path, section_heading, idx, total),
-            "doc_title": path.stem,
-            "chunk_type": "section",
-            "title": section_heading,
-            "body": body,
-        }
-
-
 # ── Plain text ────────────────────────────────────────────────────────────────
 
 
@@ -358,8 +266,6 @@ _EXT_MAP = {
     ".yml": chunk_openapi,
     ".md": chunk_markdown,
     ".markdown": chunk_markdown,
-    ".pdf": chunk_pdf,
-    ".docx": chunk_docx,
     ".txt": chunk_text,
     ".rst": chunk_text,
 }

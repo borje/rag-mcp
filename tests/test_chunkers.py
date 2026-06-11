@@ -6,7 +6,7 @@ All green = chunking meets retrieval-quality bar.
 
 import pytest
 from pathlib import Path
-from chunkers import chunk_markdown, chunk_pdf
+from chunkers import chunk_markdown
 
 # Target: no chunk should exceed this many chars.
 MAX_CHUNK_CHARS = 1200
@@ -19,8 +19,6 @@ REQUIRED_METADATA = {
     "section_path",
     "chunk_index",
     "chunk_total",
-    "page_start",
-    "page_end",
 }
 
 # ----- fixtures ----------------------------------------------------------------
@@ -164,8 +162,6 @@ def test_markdown_chunks_include_required_metadata(md_file: Path):
     for c in chunks:
         assert REQUIRED_METADATA <= c.keys()
         assert c["source_name"] == "api_docs.md"
-        assert c["page_start"] is None
-        assert c["page_end"] is None
 
 
 def test_markdown_split_chunks_have_section_indices(md_file: Path):
@@ -178,22 +174,3 @@ def test_markdown_split_chunks_have_section_indices(md_file: Path):
     assert {c["section_path"] for c in auth_chunks} == {"Authentication"}
 
 
-def test_pdf_chunks_include_page_metadata(tmp_path: Path):
-    fitz = pytest.importorskip("fitz")
-
-    pdf = tmp_path / "guide.pdf"
-    doc = fitz.open()
-    for page_text in ["First page content " * 10, "Second page content " * 10]:
-        page = doc.new_page()
-        page.insert_text((72, 72), page_text)
-    doc.save(pdf)
-    doc.close()
-
-    chunks = list(chunk_pdf(pdf))
-
-    assert len(chunks) == 2
-    assert [c["page_start"] for c in chunks] == [1, 2]
-    assert [c["page_end"] for c in chunks] == [1, 2]
-    assert [c["chunk_index"] for c in chunks] == [0, 1]
-    assert {c["chunk_total"] for c in chunks} == {2}
-    assert {c["section_path"] for c in chunks} == {"guide"}

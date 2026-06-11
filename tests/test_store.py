@@ -40,8 +40,6 @@ def _chunks(source: str, tag: str = "v1", n: int = 2) -> list[dict]:
             "section_path": "test",
             "chunk_index": i,
             "chunk_total": n,
-            "page_start": None,
-            "page_end": None,
             "title": f"Section {i}",
             "body": f"[{tag}] Body text for chunk {i}. Enough content to exceed minimum length filter.",
         }
