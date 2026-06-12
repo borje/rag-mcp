@@ -233,14 +233,22 @@ class RAGStore:
         misalignment silently attributes the wrong body/vector to a chunk.
         """
         sizes = [len(self._chunks), len(self._bodies)]
+        vector_size: int | None = None
         if self._vectors is not None:
-            sizes.append(int(self._vectors.shape[0]))
+            vector_size = int(self._vectors.shape[0])
+        elif self._chunks or self._bodies:
+            # Missing/corrupt vectors.npy with surviving metadata must be
+            # treated as an inconsistent store so the next ingest re-embeds
+            # the affected sources instead of skipping them forever.
+            vector_size = 0
+        if vector_size is not None:
+            sizes.append(vector_size)
         m = min(sizes)
         if any(s != m for s in sizes):
             print(
                 f"[store] inconsistent store files "
                 f"(chunks={len(self._chunks)}, bodies={len(self._bodies)}, "
-                f"vectors={sizes[2] if len(sizes) > 2 else 'absent'}); "
+                f"vectors={vector_size if vector_size is not None else 'absent'}); "
                 f"truncating to {m} — re-run ingest to restore",
                 file=sys.stderr,
             )

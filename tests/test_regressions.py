@@ -2,6 +2,8 @@
 robustness, ingest isolation)."""
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -99,6 +101,43 @@ def test_missing_bodies_file_does_not_crash(tmp_path, monkeypatch):
 
     assert s2.search("anything at all") == []
     assert s2.source_mtime("/a.md") is None
+
+def test_missing_vectors_file_clears_stale_mtimes(tmp_path, monkeypatch):
+    """meta.json/bodies.json without vectors.npy must be treated as inconsistent
+    so the next scan re-ingests instead of skipping the source forever."""
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(store_module.current_index_manifest()), encoding="utf-8"
+    )
+    (tmp_path / "meta.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "1",
+                    "source": "/a.md",
+                    "source_name": "a.md",
+                    "doc_title": "t",
+                    "chunk_type": "section",
+                    "section_path": "S",
+                    "chunk_index": 0,
+                    "chunk_total": 1,
+                    "page_start": None,
+                    "page_end": None,
+                    "title": "T",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "bodies.json").write_text(
+        json.dumps(["body content " * 10]), encoding="utf-8"
+    )
+    (tmp_path / "mtimes.json").write_text(json.dumps({"/a.md": 1.0}), encoding="utf-8")
+
+    s = RAGStore()
+
+    assert s.stats()["total_chunks"] == 0
+    assert s.source_mtime("/a.md") is None
 
 
 def test_corrupt_meta_does_not_prevent_boot(tmp_path, monkeypatch):
@@ -310,6 +349,68 @@ def test_orphan_chunks_not_duplicated_on_rescan(tmp_path, monkeypatch):
     server_module._ingest_files_root()
 
     assert len(fresh._chunks) == count, "orphan chunks were duplicated"
+
+
+def test_concurrent_scans_do_not_duplicate_same_file(tmp_path, monkeypatch):
+    """Manual ingest and the watch loop can overlap; one changed file should
+    still be indexed exactly once."""
+    server_module, fresh, files_root = _server_env(tmp_path, monkeypatch)
+    doc = files_root / "a.md"
+    doc.write_text("# T\n\n" + "content " * 30, encoding="utf-8")
+
+    chunk_started = threading.Event()
+    release_chunking = threading.Event()
+    chunk_calls = 0
+
+    def slow_chunk_file(path):
+        nonlocal chunk_calls
+        chunk_calls += 1
+        chunk_started.set()
+        release_chunking.wait(timeout=1)
+        return [
+            {
+                "id": "chunk-1",
+                "source": str(path),
+                "source_name": path.name,
+                "doc_title": "t",
+                "chunk_type": "section",
+                "section_path": "T",
+                "chunk_index": 0,
+                "chunk_total": 1,
+                "page_start": None,
+                "page_end": None,
+                "title": "T",
+                "body": "content " * 30,
+            }
+        ]
+
+    monkeypatch.setattr(server_module, "chunk_file", slow_chunk_file)
+
+    results: list[object] = []
+    errors: list[Exception] = []
+
+    def run_scan():
+        try:
+            results.append(server_module._ingest_files_root())
+        except Exception as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=run_scan)
+    second = threading.Thread(target=run_scan)
+    first.start()
+    assert chunk_started.wait(timeout=1), "first scan never reached chunking"
+    second.start()
+    time.sleep(0.05)
+    release_chunking.set()
+    first.join()
+    second.join()
+
+    assert not errors
+    assert len(results) == 2
+    assert chunk_calls == 1
+    assert len(fresh._chunks) == 1
+
+
 
 
 # ── dashboard: URL encoding ──────────────────────────────────────────────────

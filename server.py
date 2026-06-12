@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -24,6 +25,8 @@ mcp = FastMCP(
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
 FILES_ROOT = Path(os.environ.get("FILES_ROOT", "/data"))
 WATCH_INTERVAL = int(os.environ.get("RAG_MCP_WATCH_INTERVAL", "30"))
+
+_ingest_lock = threading.Lock()
 
 
 def _file_url(source: str) -> str | None:
@@ -81,74 +84,78 @@ class IngestResult(BaseModel):
 
 def _ingest_files_root(log=None) -> IngestResult:
     """Ingest supported files under FILES_ROOT and remove stale sources."""
-    FILES_ROOT.mkdir(parents=True, exist_ok=True)
-    removed_sources = _cleanup_stale_sources()
-    files: list[FileIngestResult] = []
-    skipped: list[str] = []
-    failed: list[str] = []
-    candidates = [
-        f
-        for f in sorted(FILES_ROOT.glob("**/*"))
-        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
-    ]
-    if log:
-        log(f"found {len(candidates)} supported file(s)")
-    for i, f in enumerate(candidates, 1):
-        label = f.relative_to(FILES_ROOT)
-        try:
-            current_mtime = f.stat().st_mtime
-            if store.source_mtime(str(f)) == current_mtime:
+    with _ingest_lock:
+        FILES_ROOT.mkdir(parents=True, exist_ok=True)
+        removed_sources = _cleanup_stale_sources()
+        files: list[FileIngestResult] = []
+        skipped: list[str] = []
+        failed: list[str] = []
+        candidates = [
+            f
+            for f in sorted(FILES_ROOT.glob("**/*"))
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+        if log:
+            log(f"found {len(candidates)} supported file(s)")
+        for i, f in enumerate(candidates, 1):
+            label = f.relative_to(FILES_ROOT)
+            try:
+                current_mtime = f.stat().st_mtime
+                if store.source_mtime(str(f)) == current_mtime:
+                    if log:
+                        log(f"[{i}/{len(candidates)}] unchanged {label}")
+                    continue
+                # Always remove existing chunks for this source first: an ingest
+                # interrupted before the mtime was recorded leaves orphan chunks
+                # that would otherwise be duplicated by the re-ingest.
+                stale = store.delete_source(str(f))
+                if stale and log:
+                    log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
                 if log:
-                    log(f"[{i}/{len(candidates)}] unchanged {label}")
-                continue
-            # Always remove existing chunks for this source first: an ingest
-            # interrupted before the mtime was recorded leaves orphan chunks
-            # that would otherwise be duplicated by the re-ingest.
-            stale = store.delete_source(str(f))
-            if stale and log:
-                log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
-            if log:
-                log(f"[{i}/{len(candidates)}] chunking {label}")
-            chunks = chunk_file(f)
-            if chunks:
-                if log:
-                    log(
-                        f"[{i}/{len(candidates)}] embedding {label} "
-                        f"({len(chunks)} chunks)"
-                    )
-                n = store.ingest(
-                    chunks,
-                    mtime=current_mtime,
-                    log=(
-                        lambda message: log(
-                            f"[{i}/{len(candidates)}] {label}: {message}"
+                    log(f"[{i}/{len(candidates)}] chunking {label}")
+                chunks = chunk_file(f)
+                if chunks:
+                    if log:
+                        log(
+                            f"[{i}/{len(candidates)}] embedding {label} "
+                            f"({len(chunks)} chunks)"
                         )
+                    n = store.ingest(
+                        chunks,
+                        mtime=current_mtime,
+                        log=(
+                            lambda message: log(
+                                f"[{i}/{len(candidates)}] {label}: {message}"
+                            )
+                        )
+                        if log
+                        else None,
                     )
-                    if log
-                    else None,
-                )
+                    if log:
+                        log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
+                    files.append(FileIngestResult(file=f.name, chunks=n))
+                else:
+                    if log:
+                        log(
+                            f"[{i}/{len(candidates)}] skipped {label} "
+                            f"(no chunks extracted)"
+                        )
+                    skipped.append(f.name)
+            except Exception as e:
+                # One bad file must not abort the scan for the remaining files.
+                print(f"[ingest] failed {label}: {e}", file=sys.stderr, flush=True)
                 if log:
-                    log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
-                files.append(FileIngestResult(file=f.name, chunks=n))
-            else:
-                if log:
-                    log(f"[{i}/{len(candidates)}] skipped {label} (no chunks extracted)")
-                skipped.append(f.name)
-        except Exception as e:
-            # One bad file must not abort the scan for the remaining files.
-            print(f"[ingest] failed {label}: {e}", file=sys.stderr, flush=True)
-            if log:
-                log(f"[{i}/{len(candidates)}] FAILED {label}: {e}")
-            failed.append(f.name)
+                    log(f"[{i}/{len(candidates)}] FAILED {label}: {e}")
+                failed.append(f.name)
 
-    return IngestResult(
-        total_chunks=sum(r.chunks for r in files),
-        total_files=len(files),
-        files=files,
-        skipped_files=skipped,
-        failed_files=failed,
-        removed_sources=removed_sources,
-    )
+        return IngestResult(
+            total_chunks=sum(r.chunks for r in files),
+            total_files=len(files),
+            files=files,
+            skipped_files=skipped,
+            failed_files=failed,
+            removed_sources=removed_sources,
+        )
 
 
 def _cleanup_stale_sources() -> list[str]:
