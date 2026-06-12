@@ -62,6 +62,36 @@ def test_dashboard_data_groups_chunks_by_relative_source(tmp_path, monkeypatch):
     assert "body" not in payload["files"][1]["chunks"][0]
 
 
+def test_dashboard_data_includes_scopes(tmp_path, monkeypatch):
+    files_root = tmp_path / "files"
+    files_root.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+
+    monkeypatch.setattr(store_module, "STORE_DIR", store_dir)
+
+    fresh = RAGStore()
+    monkeypatch.setattr(
+        fresh, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    fresh.ingest(
+        [
+            {
+                "id": "chunk-1",
+                "source": str(files_root / "docs" / "guide.md"),
+                "relative_source": "docs/guide.md",
+                "doc_title": "guide",
+                "chunk_type": "section",
+                "title": "Guide",
+                "body": "Guide body text " * 40,
+            }
+        ]
+    )
+    payload = dashboard.dashboard_data(fresh, files_root, "http://testserver")
+
+    assert payload["scopes"] == [{"scope": "docs", "n_docs": 1}]
+
+
 def test_dashboard_chunk_returns_full_body(tmp_path, monkeypatch):
     store_dir = tmp_path / "store"
     store_dir.mkdir()
@@ -94,6 +124,16 @@ def test_dashboard_html_fetches_dashboard_data_and_chunks():
     assert "fetch('/dashboard/data')" in page
     assert "/dashboard/chunk/" in page
     assert "id=\"filter\"" in page
+
+
+def test_dashboard_html_scope_chips_use_prefix_match_not_text_filter():
+    page = dashboard.dashboard_html("http://testserver")
+
+    assert "id=\"scopes\"" in page
+    # Scope selection must be a hard subtree filter (exact or "scope/" prefix),
+    # independent of the free-text filter which does substring matching.
+    assert "path.startsWith(scope + '/')" in page
+    assert "els.filter.value = scope" not in page
 
 
 def test_server_dashboard_wrappers_delegate_to_dashboard_module(tmp_path, monkeypatch):

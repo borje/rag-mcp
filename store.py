@@ -145,6 +145,14 @@ def _chunk_in_scope(chunk: dict, scope: str | None) -> bool:
     return relative_source == scope or relative_source.startswith(scope + "/")
 
 
+def _expand_scopes(relative_source: str) -> list[str]:
+    norm = _normalize_scope_path(relative_source)
+    if not norm:
+        return []
+    dirs = norm.split("/")[:-1]  # drop filename
+    return ["/".join(dirs[: i + 1]) for i in range(len(dirs))]
+
+
 class RAGStore:
     def __init__(self):
         STORE_DIR.mkdir(parents=True, exist_ok=True)
@@ -429,6 +437,19 @@ class RAGStore:
 
     def list_sources(self) -> list[str]:
         return sorted(set(c["source"] for c in self._chunks))
+
+    def list_scopes(self) -> list[dict]:
+        scope_sources: dict[str, set[str]] = {}
+        for c in self._chunks:
+            relative_source = c.get("relative_source")
+            if not relative_source:
+                continue
+            for scope in _expand_scopes(relative_source):
+                scope_sources.setdefault(scope, set()).add(c["source"])
+        return [
+            {"scope": scope, "n_docs": len(sources)}
+            for scope, sources in sorted(scope_sources.items())
+        ]
 
     def stats(self) -> dict:
         return {

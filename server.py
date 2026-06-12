@@ -225,6 +225,12 @@ def list_sources() -> str:
 
 
 @mcp.tool()
+def list_scopes() -> str:
+    """List subtree scopes under FILES_ROOT with doc counts, for use as search(scope=...)."""
+    return json.dumps(store.list_scopes())
+
+
+@mcp.tool()
 def rag_status() -> StoreStatus:
     """Show store statistics: chunk count, source count, model, storage path."""
     return StoreStatus(**store.stats())

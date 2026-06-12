@@ -63,6 +63,7 @@ def dashboard_data(store, files_root: Path, base_url: str) -> dict:
         "store_dir": stats["store_dir"],
         "files_root": str(files_root),
         "files": grouped,
+        "scopes": store.list_scopes(),
     }
 
 
@@ -104,6 +105,9 @@ def dashboard_html(base_url: str) -> str:
     .label {{ color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: .14em; font-weight: 800; }}
     .metric {{ margin-top: 8px; font-size: 34px; font-weight: 900; letter-spacing: -.04em; }}
     input {{ width: 100%; margin: 0 0 16px; padding: 14px 16px; color: #e5e7eb; background: rgba(2, 6, 23, .42); border: 1px solid rgba(148, 163, 184, .22); border-radius: 16px; font: inherit; }}
+    .scopes {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }}
+    .scope-chip {{ cursor: pointer; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(148, 163, 184, .22); background: rgba(2, 6, 23, .42); color: #bfdbfe; font-size: 13px; font-weight: 700; }}
+    .scope-chip.active {{ background: rgba(59, 130, 246, .28); border-color: rgba(96, 165, 250, .6); color: #fff; }}
     .file {{ margin-bottom: 12px; overflow: hidden; }}
     summary {{ cursor: pointer; padding: 16px 18px; list-style: none; }}
     summary::-webkit-details-marker {{ display: none; }}
@@ -134,12 +138,18 @@ def dashboard_html(base_url: str) -> str:
       <div class="card"><div class="label">Model</div><div class="muted" id="model">-</div></div>
       <div class="card"><div class="label">Files Root</div><div class="muted" id="filesRoot">-</div></div>
     </section>
+    <div id="scopes" class="scopes"></div>
     <input id="filter" type="search" placeholder="Filter files, chunk titles, types, previews...">
     <section id="files" aria-live="polite"></section>
   </main>
   <script>
     let dashboard = null;
-    const els = {{ sources: document.getElementById('sources'), chunks: document.getElementById('chunks'), model: document.getElementById('model'), filesRoot: document.getElementById('filesRoot'), files: document.getElementById('files'), filter: document.getElementById('filter') }};
+    let activeScope = '';
+
+    function inScope(path, scope) {{
+      return !scope || path === scope || path.startsWith(scope + '/');
+    }}
+    const els = {{ sources: document.getElementById('sources'), chunks: document.getElementById('chunks'), model: document.getElementById('model'), filesRoot: document.getElementById('filesRoot'), files: document.getElementById('files'), filter: document.getElementById('filter'), scopes: document.getElementById('scopes') }};
 
     function text(value) {{ return value == null ? '' : String(value); }}
 
@@ -147,10 +157,32 @@ def dashboard_html(base_url: str) -> str:
       return [chunk.title, chunk.chunk_type, chunk.preview, chunk.id].some(v => text(v).toLowerCase().includes(q));
     }}
 
+    function renderScopes() {{
+      els.scopes.textContent = '';
+      const makeChip = (label, scope) => {{
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'scope-chip';
+        chip.textContent = label;
+        if (activeScope === scope) chip.classList.add('active');
+        chip.addEventListener('click', () => {{
+          activeScope = scope;
+          render();
+          renderScopes();
+        }});
+        return chip;
+      }};
+      els.scopes.append(makeChip('All', ''));
+      for (const s of dashboard.scopes) {{
+        els.scopes.append(makeChip(`${{s.scope}} (${{s.n_docs}})`, s.scope));
+      }}
+    }}
+
     function render() {{
       const q = els.filter.value.trim().toLowerCase();
       els.files.textContent = '';
       for (const file of dashboard.files) {{
+        if (!inScope(file.path, activeScope)) continue;
         const chunks = q ? file.chunks.filter(chunk => chunkMatches(chunk, q)) : file.chunks;
         const fileMatch = [file.path, file.source].some(v => text(v).toLowerCase().includes(q));
         if (q && !fileMatch && chunks.length === 0) continue;
@@ -203,6 +235,7 @@ def dashboard_html(base_url: str) -> str:
       els.chunks.textContent = data.total_chunks;
       els.model.textContent = data.model;
       els.filesRoot.textContent = data.files_root;
+      renderScopes();
       render();
     }}).catch(err => {{ els.files.textContent = `Failed to load dashboard data: ${{err}}`; }});
     els.filter.addEventListener('input', render);

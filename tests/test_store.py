@@ -496,3 +496,72 @@ def test_ingest_records_relative_source_for_nested_files(tmp_path, monkeypatch):
     assert {c["relative_source"] for c in fresh._chunks} == {
         "library/trading/momentum/book-a.md"
     }
+
+
+# ── list_scopes ────────────────────────────────────────────────────────────────
+
+
+def test_list_scopes_returns_all_ancestor_scopes(rag_store):
+    chunks = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    )
+    rag_store.ingest(chunks)
+
+    scopes = {s["scope"] for s in rag_store.list_scopes()}
+
+    assert scopes == {
+        "library",
+        "library/trading",
+        "library/trading/momentum",
+        "library/trading/momentum/book-a",
+    }
+
+
+def test_list_scopes_dedupes_and_counts_shared_ancestors(rag_store):
+    momentum = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    )
+    risk = _scoped_chunks(
+        "/data/library/trading/risk/book-b/ch1.md",
+        "library/trading/risk/book-b/ch1.md",
+    )
+    rag_store.ingest(momentum + risk)
+
+    by_scope = {s["scope"]: s["n_docs"] for s in rag_store.list_scopes()}
+
+    assert by_scope["library"] == 2
+    assert by_scope["library/trading"] == 2
+    assert by_scope["library/trading/momentum"] == 1
+    assert by_scope["library/trading/momentum/book-a"] == 1
+    assert by_scope["library/trading/risk"] == 1
+    assert by_scope["library/trading/risk/book-b"] == 1
+
+
+def test_list_scopes_ignores_root_level_files(rag_store):
+    chunks = _scoped_chunks("/data/readme.md", "readme.md")
+    rag_store.ingest(chunks)
+
+    assert rag_store.list_scopes() == []
+
+
+def test_list_scopes_skips_chunks_without_relative_source(rag_store):
+    chunks = _chunks("/data/legacy.md")  # no relative_source set
+    rag_store.ingest(chunks)
+
+    assert rag_store.list_scopes() == []
+
+
+def test_list_scopes_normalizes_slashes_and_sorts(rag_store):
+    chunks = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "/library//trading/momentum/book-a/ch1.md",
+    )
+    rag_store.ingest(chunks)
+
+    scopes = [s["scope"] for s in rag_store.list_scopes()]
+
+    assert scopes == sorted(scopes)
+    assert "library" in scopes
+    assert "library/trading" in scopes
