@@ -59,6 +59,17 @@ def _search_chunks(source: str, section: str, n: int = 5) -> list[dict]:
     return chunks
 
 
+def _scoped_chunks(source: str, relative_source: str, n: int = 3) -> list[dict]:
+    chunks = _chunks(source, "scope", n)
+    for i, chunk in enumerate(chunks):
+        chunk["id"] = f"scope-{Path(relative_source).stem}-{i}"
+        chunk["relative_source"] = relative_source
+        chunk["section_path"] = "Scoped Section"
+        chunk["title"] = "Scoped Section"
+        chunk["body"] = f"chunk-{i} scoped content {'pad ' * 12}"
+    return chunks
+
+
 # ── store unit tests: FAIL before fix ─────────────────────────────────────────
 
 
@@ -357,3 +368,131 @@ def test_search_adjacent_chunks_do_not_cross_section(rag_store, monkeypatch):
     results = rag_store.search("needle", n=2)
 
     assert [r["id"] for r in results] == ["c2", "c1"]
+
+
+def test_search_scope_filters_nested_subtree(rag_store, monkeypatch):
+    momentum = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    )
+    risk = _scoped_chunks(
+        "/data/library/trading/risk/book-b/ch1.md",
+        "library/trading/risk/book-b/ch1.md",
+    )
+    momentum[1]["body"] += " needle"
+    risk[1]["body"] += " needle"
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), 3), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if text == "needle":
+                vectors[row, 1] = 1
+            elif "needle" in text:
+                vectors[row, 1] = 1
+        return vectors
+
+    monkeypatch.setattr(rag_store, "_embed", embed)
+    rag_store.ingest(momentum + risk)
+
+    results = rag_store.search("needle", n=4, scope="library/trading/momentum")
+
+    assert results
+    assert all(
+        r["relative_source"].startswith("library/trading/momentum/") for r in results
+    )
+
+
+def test_search_scope_normalizes_slashes_and_respects_prefix_boundary(
+    rag_store, monkeypatch
+):
+    wanted = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    )
+    sibling = _scoped_chunks(
+        "/data/library/trading/momentum-advanced/book-b/ch1.md",
+        "library/trading/momentum-advanced/book-b/ch1.md",
+    )
+    wanted[1]["body"] += " needle"
+    sibling[1]["body"] += " needle"
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), 3), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if text == "needle":
+                vectors[row, 1] = 1
+            elif "needle" in text:
+                vectors[row, 1] = 1
+        return vectors
+
+    monkeypatch.setattr(rag_store, "_embed", embed)
+    rag_store.ingest(wanted + sibling)
+
+    results = rag_store.search("needle", n=4, scope="/library//trading/momentum/")
+
+    assert results
+    assert all("momentum-advanced" not in r["relative_source"] for r in results)
+
+
+def test_scoped_search_adjacent_chunks_stay_inside_scope(rag_store, monkeypatch):
+    in_scope = _scoped_chunks(
+        "/data/library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    )
+    out_of_scope = _scoped_chunks(
+        "/data/library/trading/risk/book-b/ch1.md",
+        "library/trading/risk/book-b/ch1.md",
+    )
+    in_scope[1]["body"] += " needle"
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), 3), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if text == "needle":
+                vectors[row, 1] = 1
+                continue
+            for i in range(3):
+                if f"chunk-{i}" in text:
+                    vectors[row, i] = 1
+                    break
+        return vectors
+
+    monkeypatch.setattr(rag_store, "_embed", embed)
+    rag_store.ingest(in_scope + out_of_scope)
+
+    results = rag_store.search("needle", n=3, scope="library/trading/momentum")
+
+    assert [r["relative_source"] for r in results] == [
+        "library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+        "library/trading/momentum/book-a/ch1.md",
+    ]
+
+
+def test_ingest_records_relative_source_for_nested_files(tmp_path, monkeypatch):
+    import server as server_module
+
+    files_root = tmp_path / "files"
+    files_root.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+
+    monkeypatch.setattr(store_module, "STORE_DIR", store_dir)
+    monkeypatch.setattr(server_module, "FILES_ROOT", files_root)
+
+    fresh = RAGStore()
+    monkeypatch.setattr(
+        fresh, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    monkeypatch.setattr(server_module, "store", fresh)
+
+    doc = files_root / "library" / "trading" / "momentum" / "book-a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Book\n\n" + "Momentum content. " * 20, encoding="utf-8")
+
+    server_module._ingest_files_root()
+
+    assert fresh._chunks
+    assert {c["relative_source"] for c in fresh._chunks} == {
+        "library/trading/momentum/book-a.md"
+    }

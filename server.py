@@ -33,6 +33,14 @@ def _file_url(source: str) -> str | None:
     return dashboard.file_url(source, FILES_ROOT, BASE_URL)
 
 
+
+def _relative_source(path: Path) -> str:
+    try:
+        return path.relative_to(FILES_ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
 def dashboard_data() -> dict:
     return dashboard.dashboard_data(store, FILES_ROOT, BASE_URL)
 
@@ -115,6 +123,9 @@ def _ingest_files_root(log=None) -> IngestResult:
                     log(f"[{i}/{len(candidates)}] chunking {label}")
                 chunks = chunk_file(f)
                 if chunks:
+                    relative_source = _relative_source(f)
+                    for chunk in chunks:
+                        chunk["relative_source"] = relative_source
                     if log:
                         log(
                             f"[{i}/{len(candidates)}] embedding {label} "
@@ -178,11 +189,15 @@ def ingest() -> IngestResult:
 
 
 @mcp.tool()
-def search(query: str, n_results: int = 8) -> list[SearchResult]:
+def search(
+    query: str, n_results: int = 8, scope: str | None = None
+) -> list[SearchResult]:
     """Hybrid vector + BM25 search over ingested documents.
+    Optionally restrict matches to a subtree under FILES_ROOT using scope,
+    expressed as a relative path prefix like "books/trading".
     Returns a JSON array; each item includes file_url for direct download of the source file.
     """
-    results = store.search(query, n=n_results)
+    results = store.search(query, n=n_results, scope=scope)
     return [
         SearchResult(
             title=r["title"],

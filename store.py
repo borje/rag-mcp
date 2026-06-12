@@ -13,7 +13,7 @@ from chunkers import CHUNKER_VERSION, current_chunk_config
 
 STORE_DIR = Path(os.environ.get("RAG_MCP_DATA", Path.home() / ".local/share/rag-mcp"))
 MODEL_NAME = os.environ.get("RAG_MCP_MODEL", "BAAI/bge-small-en-v1.5")
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 
 
 def current_index_manifest() -> dict:
@@ -117,6 +117,32 @@ def _backfill_meta(chunk: dict) -> dict:
     chunk.setdefault("page_start", None)
     chunk.setdefault("page_end", None)
     return chunk
+
+
+
+def _normalize_scope_path(path: str | None) -> str | None:
+    if path is None:
+        return None
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p and p != "."]
+    normalized = "/".join(parts)
+    return normalized or None
+
+
+
+def _chunk_relative_source(chunk: dict) -> str:
+    relative_source = chunk.get("relative_source")
+    if relative_source:
+        return _normalize_scope_path(relative_source) or ""
+    source = chunk.get("source", "")
+    return _normalize_scope_path(source) or ""
+
+
+
+def _chunk_in_scope(chunk: dict, scope: str | None) -> bool:
+    if scope is None:
+        return True
+    relative_source = _chunk_relative_source(chunk)
+    return relative_source == scope or relative_source.startswith(scope + "/")
 
 
 class RAGStore:
@@ -412,7 +438,7 @@ class RAGStore:
             "store_dir": str(STORE_DIR),
         }
 
-    def search(self, query: str, n: int = 8) -> list[dict]:
+    def search(self, query: str, n: int = 8, scope: str | None = None) -> list[dict]:
         # Snapshot references so a concurrent ingest/delete (which rebinds,
         # never mutates) cannot change them mid-search.
         chunks = self._chunks
@@ -421,26 +447,49 @@ class RAGStore:
         bm25 = self._bm25
         if n <= 0 or not chunks or vectors is None:
             return []
-        n = min(n, len(chunks))
-        pool = min(n * 4, len(chunks))
+
+        scope = _normalize_scope_path(scope)
+        if scope is None:
+            candidate_indices = None
+            n_candidates = len(chunks)
+        else:
+            candidate_indices = np.array(
+                [i for i, chunk in enumerate(chunks) if _chunk_in_scope(chunk, scope)],
+                dtype=np.int32,
+            )
+            if candidate_indices.size == 0:
+                return []
+            n_candidates = int(candidate_indices.size)
+
+        n = min(n, n_candidates)
+        pool = min(n * 4, n_candidates)
         adjacent = max(0, int(os.environ.get("RAG_MCP_ADJACENT_CHUNKS", "1")))
 
         # Cosine similarity (vector search)
         q = self._embed([query])[0]
-        dot = vectors @ q
         if self._norms is None or len(self._norms) != vectors.shape[0]:
             self._norms = np.linalg.norm(vectors, axis=1)
-        norms = self._norms * np.linalg.norm(q)
+        if candidate_indices is None:
+            dot = vectors @ q
+            norms = self._norms * np.linalg.norm(q)
+        else:
+            dot = vectors[candidate_indices] @ q
+            norms = self._norms[candidate_indices] * np.linalg.norm(q)
         norms = np.where(norms < 1e-10, 1e-10, norms)
         cos_sims = dot / norms
-        vec_ranks = np.argsort(-cos_sims)[:pool]
+        top_local = np.argsort(-cos_sims)[:pool]
+        vec_ranks = top_local if candidate_indices is None else candidate_indices[top_local]
 
         # BM25 keyword search
+        query_terms = query.lower().split()
         if bm25 is not None:
-            bm25_scores = bm25.get_scores(query.lower().split())
+            bm25_scores = bm25.get_scores(query_terms)
+            if candidate_indices is not None:
+                bm25_scores = bm25_scores[candidate_indices]
         else:
-            bm25_scores = np.zeros(len(chunks), dtype=np.float32)
-        bm25_ranks = np.argsort(-bm25_scores)[:pool]
+            bm25_scores = np.zeros(n_candidates, dtype=np.float32)
+        top_local = np.argsort(-bm25_scores)[:pool]
+        bm25_ranks = top_local if candidate_indices is None else candidate_indices[top_local]
 
         # Reciprocal Rank Fusion (k=60)
         k = 60
@@ -454,6 +503,7 @@ class RAGStore:
 
         ranked = sorted(rrf, key=lambda i: -rrf[i])
         match_types = {idx: "hit" for idx in ranked}
+        allowed = None if candidate_indices is None else set(int(i) for i in candidate_indices)
 
         def _neighbor(idx: int, offset: int) -> int | None:
             """Adjacent chunk by store position, validated by metadata.
@@ -466,7 +516,8 @@ class RAGStore:
             if 0 <= j < len(chunks):
                 a, b = chunks[idx], chunks[j]
                 if (
-                    b.get("source") == a.get("source")
+                    (allowed is None or j in allowed)
+                    and b.get("source") == a.get("source")
                     and b.get("section_path") == a.get("section_path")
                     and b.get("chunk_index") == a.get("chunk_index", 0) + offset
                 ):
@@ -482,7 +533,7 @@ class RAGStore:
                     candidates.append(_neighbor(idx, -offset))
                     candidates.append(_neighbor(idx, offset))
                 for candidate in candidates:
-                    if candidate is None or candidate in seen:
+                    if candidate is None or candidate in seen or (allowed is not None and candidate not in allowed):
                         continue
                     expanded.append(candidate)
                     if candidate != idx:
