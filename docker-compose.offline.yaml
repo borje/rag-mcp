@@ -2,6 +2,7 @@ services:
   rag-mcp:
     build:
       dockerfile: Dockerfile.offline
+    restart: unless-stopped
     environment:
       MD_CHUNK_MAX_CHARS: ${MD_CHUNK_MAX_CHARS:-1000}
       MD_CHUNK_OVERLAP_CHARS: ${MD_CHUNK_OVERLAP_CHARS:-150}

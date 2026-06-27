@@ -1,6 +1,7 @@
 services:
   rag-mcp:
     build: .
+    restart: unless-stopped
     ports:
       - "${EXTERNAL_PORT:-8001}:8000"
     volumes:
