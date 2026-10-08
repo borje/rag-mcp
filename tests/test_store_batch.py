@@ -111,3 +111,67 @@ def test_ingested_chunks_have_no_page_fields(rag_store):
     result = rag_store.search("apple", n=1)[0]
     assert "page_start" not in result
     assert "page_end" not in result
+
+
+# ── BM25 index construction ──────────────────────────────────────────────────
+
+
+def _reference_bm25(corpus, query, k1=1.5, b=0.75):
+    """Straightforward BM25Okapi (same IDF formula as _SparseBM25) for cross-checking."""
+    import math
+
+    n = len(corpus)
+    avgdl = sum(len(d) for d in corpus) / n
+    df = {}
+    for d in corpus:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    scores = []
+    for d in corpus:
+        s = 0.0
+        for t in query:
+            tf = d.count(t)
+            if tf == 0:
+                continue
+            idf = math.log1p((n - df[t] + 0.5) / (df[t] + 0.5))
+            s += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(d) / avgdl))
+        scores.append(s)
+    return np.array(scores, dtype=np.float32)
+
+
+def test_sparse_bm25_matches_reference_on_random_corpus():
+    import random
+
+    from store import _SparseBM25
+
+    rng = random.Random(7)
+    vocab = [f"w{i}" for i in range(50)]
+    corpus = [rng.choices(vocab, k=rng.randint(1, 40)) for _ in range(200)]
+    corpus[3] = []  # empty document must not break construction
+    idx = _SparseBM25(corpus)
+    for query in (["w1"], ["w1", "w2", "w2", "unknown"], vocab[:10]):
+        np.testing.assert_allclose(
+            idx.get_scores(query), _reference_bm25(corpus, query), rtol=1e-5, atol=1e-6
+        )
+
+
+def test_sparse_bm25_empty_corpus_and_no_tokens():
+    from store import _SparseBM25
+
+    assert _SparseBM25([]).get_scores(["x"]).shape == (0,)
+    assert list(_SparseBM25([[], []]).get_scores(["x"])) == [0.0, 0.0]
+
+
+def test_delete_sources_can_defer_bm25_rebuild(rag_store, monkeypatch):
+    rag_store.ingest([_chunk("a.md", 0, "alpha body one"), _chunk("a.md", 1, "alpha body two")])
+    rag_store.ingest([_chunk("b.md", 0, "beta body one"), _chunk("b.md", 1, "beta body two")])
+    calls = []
+    monkeypatch.setattr(rag_store, "_rebuild_bm25", lambda: calls.append(1))
+    rag_store.delete_sources(["/data/docs/a.md"], rebuild_bm25=False)
+    assert calls == []
+    # Positions shifted, so the stale index is dropped and search is vector-only until rebuild.
+    assert rag_store._bm25 is None
+    results = rag_store.search("beta body", n=4)
+    assert results and all(r["source"] == "/data/docs/b.md" for r in results)
+    rag_store.rebuild_bm25()
+    assert calls == [1]

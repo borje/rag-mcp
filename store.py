@@ -49,57 +49,36 @@ class _SparseBM25:
         if n == 0:
             return
 
-        # Build vocabulary and per-term posting lists {term_id: [(doc, tf)]}
-        vocab: dict[str, int] = {}
-        posting: dict[int, list] = {}
-        doc_lens = np.zeros(n, dtype=np.int32)
-
-        for d, doc in enumerate(corpus):
-            doc_lens[d] = len(doc)
-            counts: dict[str, int] = {}
-            for tok in doc:
-                counts[tok] = counts.get(tok, 0) + 1
-            for tok, cnt in counts.items():
-                if tok not in vocab:
-                    t = len(vocab)
-                    vocab[tok] = t
-                else:
-                    t = vocab[tok]
-                if t not in posting:
-                    posting[t] = []
-                posting[t].append((d, cnt))
-
-        self._vocab = vocab
-        avgdl = float(doc_lens.mean())
+        # One Python pass assigns term ids; everything after is numpy.
+        vocab = self._vocab
+        doc_lens = np.fromiter((len(d) for d in corpus), dtype=np.int32, count=n)
+        term_ids = np.fromiter(
+            (vocab.setdefault(tok, len(vocab)) for doc in corpus for tok in doc),
+            dtype=np.int64,
+            count=int(doc_lens.sum()),
+        )
         V = len(vocab)
+        if V == 0:
+            return
+        doc_ids = np.repeat(np.arange(n, dtype=np.int64), doc_lens)
+
+        # Unique (term, doc) pairs with counts = tf; sorted by term then doc,
+        # which is exactly the CSC order the flat arrays need.
+        pairs, tf = np.unique(term_ids * n + doc_ids, return_counts=True)
+        term_of = pairs // n
+        doc_of = (pairs % n).astype(np.int32)
+        df = np.bincount(term_of, minlength=V)
 
         # IDF: log(1 + (n - df + 0.5) / (df + 0.5)) — always non-negative
-        idf = np.zeros(V, dtype=np.float32)
-        for t, posts in posting.items():
-            df = len(posts)
-            idf[t] = np.log1p((n - df + 0.5) / (df + 0.5))
-        self._idf = idf
+        self._idf = np.log1p((n - df + 0.5) / (df + 0.5)).astype(np.float32)
 
-        # Precompute BM25 term-doc scores in CSC-like flat arrays.
-        # _term_ptr[t]:_term_ptr[t+1] → slice of _doc_indices / _bm25_vals for term t.
+        avgdl = float(doc_lens.mean())
+        norm = k1 * (1.0 - b + b * doc_lens[doc_of] / avgdl)
+        self._bm25_vals = (tf * (k1 + 1.0) / (tf + norm)).astype(np.float32)
+        self._doc_indices = doc_of
         term_ptr = np.zeros(V + 1, dtype=np.int32)
-        for t in range(V):
-            term_ptr[t + 1] = term_ptr[t] + len(posting[t])
-        nnz = int(term_ptr[-1])
-
-        doc_indices = np.zeros(nnz, dtype=np.int32)
-        bm25_vals = np.zeros(nnz, dtype=np.float32)
-
-        for t in range(V):
-            start = int(term_ptr[t])
-            for i, (d, tf) in enumerate(posting[t]):
-                norm = k1 * (1.0 - b + b * float(doc_lens[d]) / avgdl)
-                doc_indices[start + i] = d
-                bm25_vals[start + i] = tf * (k1 + 1.0) / (tf + norm)
-
+        np.cumsum(df, out=term_ptr[1:])
         self._term_ptr = term_ptr
-        self._doc_indices = doc_indices
-        self._bm25_vals = bm25_vals
 
     def get_scores(self, query: list[str]) -> np.ndarray:
         scores = np.zeros(self._n, dtype=np.float32)
@@ -441,10 +420,12 @@ class RAGStore:
         with self._write_lock:
             self._rebuild_bm25()
 
-    def delete_source(self, source: str) -> int:
-        return self.delete_sources([source]).get(source, 0)
+    def delete_source(self, source: str, rebuild_bm25: bool = True) -> int:
+        return self.delete_sources([source], rebuild_bm25=rebuild_bm25).get(source, 0)
 
-    def delete_sources(self, sources: Iterable[str]) -> dict[str, int]:
+    def delete_sources(
+        self, sources: Iterable[str], rebuild_bm25: bool = True
+    ) -> dict[str, int]:
         sources = set(sources)
         removed = dict.fromkeys(sources, 0)
         with self._write_lock:
@@ -467,7 +448,12 @@ class RAGStore:
             for source in sources:
                 self._mtimes.pop(source, None)
             self._save()
-            self._rebuild_bm25()
+            if rebuild_bm25:
+                self._rebuild_bm25()
+            else:
+                # Positions shifted, so the old index would misattribute scores:
+                # drop it (search falls back to vector-only) until rebuild_bm25().
+                self._bm25 = None
             self._reload_vectors_mmapped()
         return removed
 

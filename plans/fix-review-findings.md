@@ -72,6 +72,12 @@ Files: `server.py`, `store.py`, `dashboard.py`, `test_startup.py`, `tests/test_s
 - `ignored_files` skips dot-paths.
 - Not fixed: the pre-existing search snapshot race between `_chunks` and `_vectors`/`_bm25` (would need a single atomically swapped state tuple); `ingest(mtime=)`/`source_mtime()` kept for test compatibility.
 
+## Performance follow-up (2026-10-08, measured on a Core Ultra 5 125U under WSL2)
+- Embedding is hardware-bound here at 5-7 chunks/s; batch size, ONNX threads, fp32 vs int8 and process parallelism all made it equal or slower. Defaults kept. Measure again on the Docker host.
+- `_SparseBM25` build vectorized (`np.unique` on term*n+doc pairs): rebuild at 20k chunks 5.2s → 2.0s (now split roughly evenly between `re.findall` tokenization and index construction), cold load 3.4s → 1.1s, search 17ms → 9ms.
+- Deletes during a scan no longer rebuild BM25 per file (`rebuild_bm25=False` drops the index; search is vector-only until the single rebuild at scan end).
+- Startup scan runs in a daemon thread: dashboard reachable 2s after start while embedding continues; SIGTERM exits in ~0.2s instead of after the scan.
+
 ## Deliberately not done
 - Persisting the BM25 index to disk: rebuild on load is seconds for stores this size. Add when cold start is measured as a problem.
 - Full content hashing on every scan: see T4.2 ceiling comment.

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Hybrid RAG MCP server — offline, fastembed ONNX embeddings, no cloud."""
 
-import asyncio
 import hashlib
 import json
 import os
@@ -116,6 +115,7 @@ def _ingest_files_root(log=None) -> IngestResult:
         started = time.monotonic()
         FILES_ROOT.mkdir(parents=True, exist_ok=True)
         removed_sources = _cleanup_stale_sources()
+        bm25_dirty = bool(removed_sources)
         files: list[FileIngestResult] = []
         skipped: list[str] = []
         failed: list[str] = []
@@ -160,7 +160,8 @@ def _ingest_files_root(log=None) -> IngestResult:
                     # Always remove existing chunks for this source first: an ingest
                     # interrupted before the fingerprint was recorded leaves orphan
                     # chunks that would otherwise be duplicated by the re-ingest.
-                    stale = store.delete_source(str(f))
+                    stale = store.delete_source(str(f), rebuild_bm25=False)
+                    bm25_dirty = bm25_dirty or bool(stale)
                     if stale and log:
                         log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
                     if log:
@@ -187,6 +188,7 @@ def _ingest_files_root(log=None) -> IngestResult:
                             if log
                             else None,
                         )
+                        bm25_dirty = True
                         if log:
                             log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
                         files.append(FileIngestResult(file=f.name, chunks=n))
@@ -209,7 +211,7 @@ def _ingest_files_root(log=None) -> IngestResult:
                     if fp is not None and "sha256" in fp:
                         store.touch_source(str(f), fp)
         finally:
-            if files:
+            if bm25_dirty:
                 store.rebuild_bm25()
 
         _last_scan = {
@@ -240,7 +242,7 @@ def _cleanup_stale_sources() -> list[str]:
         if not Path(s).exists() or Path(s).suffix.lower() not in SUPPORTED_EXTENSIONS
     ]
     if removed:
-        store.delete_sources(removed)
+        store.delete_sources(removed, rebuild_bm25=False)
     return removed
 
 
@@ -363,10 +365,17 @@ if __name__ == "__main__":
             if store.manifest_reset_reason:
                 print(f"[startup] {store.manifest_reset_reason}", flush=True)
                 store.manifest_reset_reason = None
+            previous_ignored = (_last_scan or {}).get("ignored")
             try:
                 result = _ingest_files_root(
                     lambda message: print(f"[startup] {message}", flush=True)
                 )
+                if _last_scan["ignored"] and _last_scan["ignored"] != previous_ignored:
+                    print(
+                        f"[startup] ignored {_last_scan['ignored']} unsupported "
+                        f"file(s) under {FILES_ROOT} (see ingest().ignored_files)",
+                        flush=True,
+                    )
                 for s in result.removed_sources:
                     print(f"[startup] removed stale source {Path(s).name}", flush=True)
                 for name in result.skipped_files:
@@ -394,31 +403,20 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[startup] ingestion failed: {e}", file=sys.stderr, flush=True)
 
-        async def _watch_loop(interval: int) -> None:
-            while True:
-                await asyncio.sleep(interval)
-                # Off the event loop: a synchronous ingest (chunking + ONNX
-                # embedding) here would freeze every MCP/dashboard request.
-                await asyncio.to_thread(_startup_ingest)
+        def _scan_forever(interval: int) -> None:
+            # Daemon thread, off the event loop: the server serves the previous
+            # index while the startup scan embeds, and SIGTERM is not deferred
+            # until the scan ends (every store write is atomic, so this is safe).
+            _startup_ingest()
+            while interval > 0:
+                time.sleep(interval)
+                _startup_ingest()
 
         @asynccontextmanager
         async def lifespan(app):
-            try:
-                _startup_ingest()
-                if _last_scan and _last_scan["ignored"]:
-                    print(
-                        f"[startup] ignored {_last_scan['ignored']} unsupported "
-                        f"file(s) under {FILES_ROOT} (see ingest().ignored_files)",
-                        flush=True,
-                    )
-            except KeyboardInterrupt:
-                print("[startup] interrupted", flush=True)
-            if WATCH_INTERVAL > 0:
-                # Keep a strong reference: the event loop only holds weak
-                # refs to tasks, so an unreferenced task can be GC'd.
-                app.state.watch_task = asyncio.create_task(
-                    _watch_loop(WATCH_INTERVAL)
-                )
+            threading.Thread(
+                target=_scan_forever, args=(WATCH_INTERVAL,), daemon=True, name="rag-scan"
+            ).start()
             if transport == "streamable-http":
                 async with mcp_app.router.lifespan_context(mcp_app):
                     yield

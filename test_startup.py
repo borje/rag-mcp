@@ -128,7 +128,7 @@ def test_cleanup_removes_missing_source(mock_store, tmp_path):
     with patch.object(server, "store", mock_store):
         removed = _cleanup_stale_sources()
     assert removed == [missing]
-    mock_store.delete_sources.assert_called_once_with([missing])
+    mock_store.delete_sources.assert_called_once_with([missing], rebuild_bm25=False)
 
 
 def test_cleanup_keeps_existing_source(mock_store, tmp_path):
@@ -149,7 +149,7 @@ def test_cleanup_mixed(mock_store, tmp_path):
     with patch.object(server, "store", mock_store):
         removed = _cleanup_stale_sources()
     assert removed == [missing]
-    mock_store.delete_sources.assert_called_once_with([missing])
+    mock_store.delete_sources.assert_called_once_with([missing], rebuild_bm25=False)
 
 
 def test_cleanup_removes_existing_unsupported_suffix(mock_store, tmp_path):
@@ -164,7 +164,7 @@ def test_cleanup_removes_existing_unsupported_suffix(mock_store, tmp_path):
     ):
         removed = _cleanup_stale_sources()
     assert removed == [str(pdf)]
-    mock_store.delete_sources.assert_called_once_with([str(pdf)])
+    mock_store.delete_sources.assert_called_once_with([str(pdf)], rebuild_bm25=False)
 
 
 # ---------------------------------------------------------------------------
