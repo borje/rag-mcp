@@ -140,7 +140,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
 
 CHUNKER_VERSION = 2
 
-_MD_MAX_CHARS = _env_int("MD_CHUNK_MAX_CHARS", 1000, minimum=1)
+_MD_MAX_CHARS = _env_int("MD_CHUNK_MAX_CHARS", 1500, minimum=1)
 _MD_OVERLAP_CHARS = _env_int("MD_CHUNK_OVERLAP_CHARS", 150, minimum=0)
 if _MD_OVERLAP_CHARS >= _MD_MAX_CHARS:
     raise ValueError(

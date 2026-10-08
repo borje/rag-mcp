@@ -9,7 +9,7 @@ from pathlib import Path
 from chunkers import chunk_markdown
 
 # Target: no chunk should exceed this many chars.
-MAX_CHUNK_CHARS = 1200
+MAX_CHUNK_CHARS = 1700
 
 # Overlap: adjacent sub-chunks of a split section must share at least this many chars.
 MIN_OVERLAP_CHARS = 50

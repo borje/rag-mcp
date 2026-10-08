@@ -28,7 +28,7 @@ def _reload_chunkers(monkeypatch, **env):
 def test_chunker_config_defaults(monkeypatch):
     chunkers = _reload_chunkers(monkeypatch)
 
-    assert chunkers._MD_MAX_CHARS == 1000
+    assert chunkers._MD_MAX_CHARS == 1500
     assert chunkers._MD_OVERLAP_CHARS == 150
     assert chunkers._MIN_CHUNK_BODY == 80
 
