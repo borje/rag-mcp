@@ -19,18 +19,21 @@ By default, search also includes adjacent chunks from the same source and sectio
 |--------|------------------|
 | OpenAPI (`.yaml`, `.yml`, `.json`) | One chunk per endpoint |
 | Markdown / RST | One chunk per heading section |
-| PDF | One chunk per page |
-| DOCX | One chunk per heading section |
 | Plain text | One chunk per paragraph |
+| Other (PDF, DOCX, …) via `RAG_MCP_CONVERT_CMD` | Converted to Markdown, then one chunk per heading section. Off by default, see [Environment variables](#environment-variables) |
+
+Files with other extensions are skipped and listed in `ignored_files` of the `ingest` result.
 
 ## MCP tools
 
 | Tool | Description |
 |------|-------------|
-| `ingest` | Scan `FILES_ROOT` and ingest supported new documents |
-| `search` | Hybrid vector + BM25 search, returns JSON |
+| `ingest` | Scan `FILES_ROOT` and ingest new/changed supported documents. Result includes `ignored_files` (unsupported files) |
+| `reindex` | Force re-ingest of one file, or every file under a directory (path relative to `FILES_ROOT` or absolute under it; the root itself, missing paths and paths outside are rejected). Old chunks stay searchable until each file is replaced |
+| `search` | Hybrid vector + BM25 search, optional `scope` subtree filter, returns JSON |
 | `list_sources` | List all ingested source paths |
-| `rag_status` | Chunk count, source count, model, store path |
+| `list_scopes` | List subtree scopes under `FILES_ROOT` with doc counts, for `search(scope=...)` |
+| `rag_status` | Chunk/source counts, model, store path, `last_scan`, `watch_interval`, `supported_extensions` |
 
 ### Search result format
 
@@ -44,8 +47,6 @@ By default, search also includes adjacent chunks from the same source and sectio
     "section_path": "POST /api/users",
     "chunk_index": 0,
     "chunk_total": 1,
-    "page_start": null,
-    "page_end": null,
     "file_url": "http://localhost:8000/files/api-spec.yaml",
     "score": 0.0312,
     "match_type": "hit",
@@ -114,7 +115,7 @@ This clears persisted store files inside the container store volume. Restarting 
 
 **Add documents**
 1. Copy files into `FILES_ROOT` (or `DATA_DIR` in Docker)
-2. Call `ingest` — only new/changed files are re-chunked (mtime-based)
+2. Call `ingest` — only new/changed files are re-chunked (mtime+size first, then a SHA-256 of the content when those differ; a touched but identical file is not re-embedded)
 
 **Remove documents**
 1. Delete files from `FILES_ROOT`
@@ -122,10 +123,18 @@ This clears persisted store files inside the container store volume. Restarting 
 
 **Update a document**
 1. Overwrite the file in `FILES_ROOT`
-2. Call `ingest` — mtime change triggers re-chunk
+2. Call `ingest` — a content change (detected via mtime/size, confirmed by SHA-256) triggers re-chunk
+
+**Force re-ingest of one file**
+- `reindex` with the path relative to `FILES_ROOT`
+
+**Index PDF / DOCX (optional converter)**
+1. Install a converter that prints Markdown to stdout, e.g. `pip install markitdown` or `pandoc`
+2. Set `RAG_MCP_CONVERT_CMD="markitdown {input}"` (or `pandoc -t gfm {input}` for DOCX only)
+3. Restart — the changed config triggers a rebuild; converted files are chunked like Markdown
 
 **Check index health**
-- `rag_status` — chunk + source counts, model, store path
+- `rag_status` — chunk + source counts, model, store path, last scan summary, supported extensions
 - `list_sources` — paths of every ingested file
 
 **Docker restart as shortcut**
@@ -179,3 +188,6 @@ bash transfer/install.sh
 | `MD_CHUNK_MAX_CHARS` | `1000` | Maximum size of a markdown sub-chunk in characters. |
 | `MD_CHUNK_OVERLAP_CHARS` | `150` | Overlap to keep between adjacent markdown sub-chunks. Must be smaller than `MD_CHUNK_MAX_CHARS`. |
 | `MIN_CHUNK_BODY` | `80` | Drop chunks whose body is shorter than this many characters. |
+| `RAG_MCP_CONVERT_CMD` | *(unset)* | Command template that converts a file to Markdown on stdout; `{input}` is replaced with the file path. Split like a shell command line but run without a shell (no pipes or redirects; wrap those in a script). Changing it does not rebuild the store: run `reindex` on the affected directory. Unset disables conversion. |
+| `RAG_MCP_CONVERT_EXTS` | `.pdf,.docx` | Comma-separated extensions routed through `RAG_MCP_CONVERT_CMD`. |
+| `RAG_MCP_CONVERT_TIMEOUT` | `120` | Seconds before a conversion is aborted (file is reported as failed). |

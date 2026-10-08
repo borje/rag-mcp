@@ -2,10 +2,11 @@
 
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 
@@ -23,6 +24,10 @@ def current_index_manifest() -> dict:
         "model": MODEL_NAME,
         "chunk_config": current_chunk_config(),
     }
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
 
 
 class _SparseBM25:
@@ -114,8 +119,6 @@ def _backfill_meta(chunk: dict) -> dict:
     chunk.setdefault("section_path", chunk.get("title", ""))
     chunk.setdefault("chunk_index", 0)
     chunk.setdefault("chunk_total", 1)
-    chunk.setdefault("page_start", None)
-    chunk.setdefault("page_end", None)
     return chunk
 
 
@@ -167,7 +170,7 @@ class RAGStore:
         self._vectors: Optional[np.ndarray] = None
         self._norms: Optional[np.ndarray] = None
         self._bm25: Optional[_SparseBM25] = None
-        self._mtimes: dict[str, float] = {}
+        self._mtimes: dict[str, dict] = {}  # source -> {"mtime", "size", "sha256"}
         self.manifest_reset_reason: str | None = None
         self._write_lock = threading.Lock()
         self._load()
@@ -255,7 +258,10 @@ class RAGStore:
                 print(f"[store] could not read vectors.npy: {e}", file=sys.stderr)
                 self._vectors = None
         if self._mtimes_path.exists():
-            self._mtimes = self._read_json(self._mtimes_path, {})
+            self._mtimes = {
+                k: v if isinstance(v, dict) else {"mtime": v}
+                for k, v in self._read_json(self._mtimes_path, {}).items()
+            }
         self._validate_alignment()
         self._rebuild_bm25()
 
@@ -335,7 +341,7 @@ class RAGStore:
 
     def _rebuild_bm25(self):
         if self._bodies:
-            self._bm25 = _SparseBM25([b.lower().split() for b in self._bodies])
+            self._bm25 = _SparseBM25([_tokenize(b) for b in self._bodies])
         else:
             self._bm25 = None
 
@@ -365,6 +371,8 @@ class RAGStore:
         mtime: float | None = None,
         batch_size: int | None = None,
         log=None,
+        rebuild_bm25: bool = True,
+        fingerprint: dict | None = None,
     ) -> int:
         if not chunks:
             return 0
@@ -399,28 +407,55 @@ class RAGStore:
                 else np.vstack([np.array(self._vectors), new_vecs])
             )
             self._norms = None
-            if mtime is not None:
+            if fingerprint is None and mtime is not None:
+                fingerprint = {"mtime": mtime}
+            if fingerprint is not None:
                 for chunk in chunks:
-                    self._mtimes[chunk["source"]] = mtime
+                    self._mtimes[chunk["source"]] = dict(fingerprint)
             self._save()
             if log:
                 log(f"saved {len(chunks)} chunks")
-            self._rebuild_bm25()
+            if rebuild_bm25:
+                self._rebuild_bm25()
             self._reload_vectors_mmapped()
         self._malloc_trim()
         return len(chunks)
 
     def source_mtime(self, source: str) -> float | None:
+        return (self._mtimes.get(source) or {}).get("mtime")
+
+    def source_fingerprint(self, source: str) -> dict | None:
         return self._mtimes.get(source)
 
-    def delete_source(self, source: str) -> int:
+    def touch_source(self, source: str, fingerprint: dict) -> None:
+        """Record a new fingerprint for unchanged content; rewrites only mtimes.json."""
         with self._write_lock:
-            if not self._chunks:
-                return 0
-            keep = [i for i, c in enumerate(self._chunks) if c["source"] != source]
-            removed = len(self._chunks) - len(keep)
-            if removed == 0:
-                return 0
+            self._mtimes[source] = dict(fingerprint)
+            self._save_mtimes()
+
+    def known_sources(self) -> set[str]:
+        """Sources with chunks or a fingerprint (skipped/failed files have only the latter)."""
+        return set(self.list_sources()) | set(self._mtimes)
+
+    def rebuild_bm25(self) -> None:
+        with self._write_lock:
+            self._rebuild_bm25()
+
+    def delete_source(self, source: str) -> int:
+        return self.delete_sources([source]).get(source, 0)
+
+    def delete_sources(self, sources: Iterable[str]) -> dict[str, int]:
+        sources = set(sources)
+        removed = dict.fromkeys(sources, 0)
+        with self._write_lock:
+            keep = []
+            for i, c in enumerate(self._chunks):
+                if c["source"] in sources:
+                    removed[c["source"]] += 1
+                else:
+                    keep.append(i)
+            if len(keep) == len(self._chunks):
+                return removed
             self._chunks = [self._chunks[i] for i in keep]
             self._bodies = [
                 self._bodies[i] if i < len(self._bodies) else "" for i in keep
@@ -429,7 +464,8 @@ class RAGStore:
                 np.array(self._vectors)[np.array(keep)] if keep else None
             )
             self._norms = None
-            self._mtimes.pop(source, None)
+            for source in sources:
+                self._mtimes.pop(source, None)
             self._save()
             self._rebuild_bm25()
             self._reload_vectors_mmapped()
@@ -502,9 +538,12 @@ class RAGStore:
         vec_ranks = top_local if candidate_indices is None else candidate_indices[top_local]
 
         # BM25 keyword search
-        query_terms = query.lower().split()
+        query_terms = _tokenize(query)
         if bm25 is not None:
             bm25_scores = bm25.get_scores(query_terms)
+            # ponytail: BM25 is eventually consistent during a scan; new chunks rank by vector only until rebuild_bm25()
+            if len(bm25_scores) < len(chunks):
+                bm25_scores = np.pad(bm25_scores, (0, len(chunks) - len(bm25_scores)))
             if candidate_indices is not None:
                 bm25_scores = bm25_scores[candidate_indices]
         else:

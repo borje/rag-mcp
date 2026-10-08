@@ -24,7 +24,16 @@ def mock_store():
     s.list_sources.return_value = []
     s.source_mtime.return_value = None
     s.ingest.return_value = 3
+    s.source_fingerprint.return_value = None
     s.delete_source.return_value = 2
+    s.delete_sources.return_value = {}
+    s.known_sources.side_effect = lambda: set(s.list_sources.return_value)
+    s.stats.return_value = {
+        "total_chunks": 0,
+        "total_sources": 0,
+        "model": "m",
+        "store_dir": "/tmp/x",
+    }
     return s
 
 
@@ -48,7 +57,11 @@ def test_ingest_files_root_skips_already_ingested(mock_store, tmp_path):
     f = tmp_path / "doc.md"
     f.write_text("# Title\n\n" + "word " * 30)
     mock_store.list_sources.return_value = [str(f)]
-    mock_store.source_mtime.return_value = f.stat().st_mtime
+    st = f.stat()
+    mock_store.source_fingerprint.return_value = {
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+    }
     with (
         patch.object(server, "store", mock_store),
         patch.object(server, "FILES_ROOT", tmp_path),
@@ -115,7 +128,7 @@ def test_cleanup_removes_missing_source(mock_store, tmp_path):
     with patch.object(server, "store", mock_store):
         removed = _cleanup_stale_sources()
     assert removed == [missing]
-    mock_store.delete_source.assert_called_once_with(missing)
+    mock_store.delete_sources.assert_called_once_with([missing])
 
 
 def test_cleanup_keeps_existing_source(mock_store, tmp_path):
@@ -125,7 +138,7 @@ def test_cleanup_keeps_existing_source(mock_store, tmp_path):
     with patch.object(server, "store", mock_store):
         removed = _cleanup_stale_sources()
     assert removed == []
-    mock_store.delete_source.assert_not_called()
+    mock_store.delete_sources.assert_not_called()
 
 
 def test_cleanup_mixed(mock_store, tmp_path):
@@ -136,4 +149,160 @@ def test_cleanup_mixed(mock_store, tmp_path):
     with patch.object(server, "store", mock_store):
         removed = _cleanup_stale_sources()
     assert removed == [missing]
-    mock_store.delete_source.assert_called_once_with(missing)
+    mock_store.delete_sources.assert_called_once_with([missing])
+
+
+def test_cleanup_removes_existing_unsupported_suffix(mock_store, tmp_path):
+    pdf = tmp_path / "old.pdf"
+    pdf.write_bytes(b"%PDF")
+    md = tmp_path / "keep.md"
+    md.write_text("hello")
+    mock_store.list_sources.return_value = [str(pdf), str(md)]
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "SUPPORTED_EXTENSIONS", {".md"}),
+    ):
+        removed = _cleanup_stale_sources()
+    assert removed == [str(pdf)]
+    mock_store.delete_sources.assert_called_once_with([str(pdf)])
+
+
+# ---------------------------------------------------------------------------
+# ignored files, status, reindex
+# ---------------------------------------------------------------------------
+
+
+def test_ignored_files_lists_unsupported_pdf(mock_store, tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "paper.pdf").write_bytes(b"%PDF")
+    (tmp_path / "doc.md").write_text("# Title\n\n" + "word " * 30)
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+        patch.object(server, "SUPPORTED_EXTENSIONS", {".md"}),
+    ):
+        result = _ingest_files_root()
+    assert result.ignored_files == ["sub/paper.pdf"]
+
+
+def test_ignored_files_capped(mock_store, tmp_path):
+    for i in range(205):
+        (tmp_path / f"f{i:03}.bin").write_bytes(b"x")
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        result = _ingest_files_root()
+    assert len(result.ignored_files) == 201
+    assert result.ignored_files[-1] == "... and 5 more"
+
+
+def test_scan_defers_bm25_rebuild(mock_store, tmp_path):
+    (tmp_path / "a.md").write_text("# A\n\n" + "word " * 30)
+    (tmp_path / "b.md").write_text("# B\n\n" + "word " * 30)
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        _ingest_files_root()
+    for call in mock_store.ingest.call_args_list:
+        assert call.kwargs["rebuild_bm25"] is False
+    mock_store.rebuild_bm25.assert_called_once()
+
+
+def test_rag_status_has_last_scan_after_scan(mock_store, tmp_path):
+    (tmp_path / "doc.md").write_text("# Title\n\n" + "word " * 30)
+    (tmp_path / "x.bin").write_bytes(b"x")
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        _ingest_files_root()
+        status = server.rag_status()
+    assert status.last_scan["files"] == 1
+    assert status.last_scan["ignored"] == 1
+    assert status.last_scan["at"].endswith("+00:00")
+    assert status.watch_interval == server.WATCH_INTERVAL
+    assert ".md" in status.supported_extensions
+
+
+def test_reindex_outside_files_root_raises(mock_store, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", root),
+    ):
+        with pytest.raises(ValueError):
+            server.reindex("../outside.md")
+        with pytest.raises(ValueError):
+            server.reindex(str(tmp_path / "outside.md"))
+        with pytest.raises(ValueError):
+            server.reindex(".")
+        with pytest.raises(FileNotFoundError):
+            server.reindex("missing.md")
+    mock_store.touch_source.assert_not_called()
+    mock_store.ingest.assert_not_called()
+
+
+def test_reindex_valid_file_reingests(mock_store, tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# Title\n\n" + "word " * 30)
+    st = f.stat()
+    # Store believes the file is unchanged, so only reindex forces re-embedding.
+    mock_store.list_sources.return_value = [str(f)]
+    mock_store.source_fingerprint.side_effect = lambda s: (
+        None
+        if mock_store.touch_source.called
+        else {"mtime": st.st_mtime, "size": st.st_size}
+    )
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        result = server.reindex("doc.md")
+    mock_store.touch_source.assert_any_call(str(f), {})
+    mock_store.delete_sources.assert_not_called()
+    assert result.total_files == 1
+    mock_store.ingest.assert_called_once()
+
+
+def test_reindex_directory_clears_only_sources_under_it(mock_store, tmp_path):
+    (tmp_path / "sub").mkdir()
+    inside = [str(tmp_path / "sub" / "a.md"), str(tmp_path / "sub" / "deep" / "b.md")]
+    outside = str(tmp_path / "subway.md")  # shares the prefix string, not the directory
+    mock_store.list_sources.return_value = inside + [outside]
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        server.reindex("sub")
+    assert sorted(c.args[0] for c in mock_store.touch_source.call_args_list) == sorted(inside)
+
+
+def test_reindex_symlink_targets_the_link_not_its_target(mock_store, tmp_path):
+    real = tmp_path / "real.md"
+    real.write_text("# T\n\n" + "word " * 30)
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    mock_store.list_sources.return_value = [str(real), str(link)]
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+    ):
+        server.reindex("link.md")
+    assert [c.args[0] for c in mock_store.touch_source.call_args_list if c.args[1] == {}] == [str(link)]
+
+
+def test_failed_file_is_fingerprinted_and_not_retried(mock_store, tmp_path):
+    bad = tmp_path / "bad.md"
+    bad.write_text("# T\n\n" + "word " * 30)
+    with (
+        patch.object(server, "store", mock_store),
+        patch.object(server, "FILES_ROOT", tmp_path),
+        patch.object(server, "chunk_file", side_effect=RuntimeError("boom")),
+    ):
+        result = _ingest_files_root()
+    assert result.failed_files == ["bad.md"]
+    (source, fp), _ = mock_store.touch_source.call_args
+    assert source == str(bad) and "sha256" in fp

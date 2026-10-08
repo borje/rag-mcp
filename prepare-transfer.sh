@@ -118,7 +118,7 @@ echo ""
 echo "Done! Verify with: claude mcp list"
 echo ""
 echo "Usage in Claude Code:"
-echo "  1. Put documents (.md, .pdf, .docx, .yaml, .txt) in $DOCS_DIR"
+echo "  1. Put documents (.md, .yaml, .json, .txt, .rst) in $DOCS_DIR"
 echo "  2. Run the 'ingest' tool to index them"
 echo "  3. Run the 'search' tool, e.g. search 'how to authenticate'"
 INSTALL_EOF

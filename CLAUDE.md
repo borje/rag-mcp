@@ -39,7 +39,7 @@ docker compose up --build
 
 Three modules, no framework beyond FastMCP:
 
-- **`chunkers.py`** — format-specific chunkers (`chunk_openapi`, `chunk_markdown`, `chunk_pdf`, `chunk_docx`, `chunk_text`) dispatched by `chunk_file()`. Each yields dicts with keys: `id`, `source`, `doc_title`, `chunk_type`, `title`, `body`. Chunks with `body` < 80 chars are dropped.
+- **`chunkers.py`** — format-specific chunkers (`chunk_openapi`, `chunk_markdown`, `chunk_text`, `chunk_converted`) dispatched by `chunk_file()`. `chunk_converted` runs `RAG_MCP_CONVERT_CMD` (optional) to turn other formats into Markdown. Each yields dicts with keys: `id`, `source`, `doc_title`, `chunk_type`, `title`, `body`. Chunks with `body` < 80 chars are dropped.
 
 - **`store.py`** — `RAGStore` persists chunks as `meta.json` + `vectors.npy` in `RAG_MCP_DATA`. Lazy-loads fastembed model on first embed. Search: cosine similarity + BM25Okapi → Reciprocal Rank Fusion (k=60). BM25 index rebuilt in-memory on every ingest/delete.
 
@@ -52,7 +52,7 @@ Three modules, no framework beyond FastMCP:
     "id": str,           # UUID
     "source": str,       # absolute file path
     "doc_title": str,    # document-level title
-    "chunk_type": str,   # "endpoint" | "section" | "page" | "paragraph"
+    "chunk_type": str,   # "endpoint" | "section" | "paragraph"
     "title": str,        # chunk-level title
     "body": str,         # searchable text (≥80 chars)
 }

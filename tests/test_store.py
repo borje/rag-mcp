@@ -175,15 +175,15 @@ def test_changed_file_triggers_reingest(tmp_path, monkeypatch):
     count_v1 = len(fresh._chunks)
     assert count_v1 > 0
 
-    # Modify file: advance mtime explicitly so the test is not time-dependent
-    new_mtime = doc.stat().st_mtime + 1.0
-    os.utime(doc, (new_mtime, new_mtime))
+    # Modify file, then advance mtime explicitly so the test is not time-dependent
     doc.write_text(
         "# API\n\n"
         + "Updated version content. " * 10
         + "\n\n## New Section\n\n"
         + "Extra section content. " * 10
     )
+    new_mtime = doc.stat().st_mtime + 10
+    os.utime(doc, (new_mtime, new_mtime))
 
     _ingest_files_root()
 
@@ -563,3 +563,83 @@ def test_list_scopes_normalizes_slashes_and_sorts(rag_store):
     assert scopes == sorted(scopes)
     assert "library" in scopes
     assert "library/trading" in scopes
+
+
+# ── fingerprint change detection ──────────────────────────────────────────────
+
+
+def test_bare_float_mtimes_upgraded_on_load(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    s1 = RAGStore()
+    monkeypatch.setattr(
+        s1, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    s1.ingest(_chunks("/docs/api.md"), mtime=42.0)
+    (tmp_path / "mtimes.json").write_text(json.dumps({"/docs/api.md": 42.0}))
+    s2 = RAGStore()
+    assert s2.source_fingerprint("/docs/api.md") == {"mtime": 42.0}
+    assert s2.source_mtime("/docs/api.md") == 42.0
+
+
+def test_ingest_stores_fingerprint(rag_store):
+    fp = {"mtime": 1.0, "size": 10, "sha256": "abc"}
+    rag_store.ingest(_chunks("/docs/api.md"), fingerprint=fp)
+    assert rag_store.source_fingerprint("/docs/api.md") == fp
+    assert rag_store.source_mtime("/docs/api.md") == 1.0
+
+
+def test_touch_source_saves_only_mtimes(rag_store, monkeypatch):
+    rag_store.ingest(_chunks("/docs/api.md"), fingerprint={"mtime": 1.0})
+    monkeypatch.setattr(
+        rag_store, "_save", lambda: pytest.fail("touch_source must not rewrite the index")
+    )
+    fp = {"mtime": 2.0, "size": 5, "sha256": "x"}
+    rag_store.touch_source("/docs/api.md", fp)
+    on_disk = json.loads((rag_store._mtimes_path).read_text())
+    assert on_disk["/docs/api.md"] == fp
+
+
+def _server_with_store(tmp_path, monkeypatch):
+    import server as server_module
+
+    files_root = tmp_path / "files"
+    files_root.mkdir()
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    monkeypatch.setattr(store_module, "STORE_DIR", store_dir)
+    monkeypatch.setattr(server_module, "FILES_ROOT", files_root)
+    fresh = RAGStore()
+    monkeypatch.setattr(
+        fresh, "_embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32)
+    )
+    monkeypatch.setattr(server_module, "store", fresh)
+    return server_module, files_root, fresh
+
+
+def test_same_tick_rewrite_with_different_size_reingests(tmp_path, monkeypatch):
+    server_module, files_root, fresh = _server_with_store(tmp_path, monkeypatch)
+    doc = files_root / "api.md"
+    doc.write_text("# API\n\n" + "First version content. " * 10)
+    server_module._ingest_files_root()
+    mtime = doc.stat().st_mtime
+    doc.write_text("# API\n\n" + "Second version content. " * 12)
+    os.utime(doc, (mtime, mtime))  # same tick: mtime unchanged
+    r = server_module._ingest_files_root()
+    assert r.total_files == 1
+    bodies = " ".join(fresh._load_bodies())
+    assert "Second version" in bodies and "First version" not in bodies
+
+
+def test_touch_without_content_change_skips_embedding(tmp_path, monkeypatch):
+    server_module, files_root, fresh = _server_with_store(tmp_path, monkeypatch)
+    doc = files_root / "api.md"
+    doc.write_text("# API\n\n" + "Content. " * 20)
+    server_module._ingest_files_root()
+    new_mtime = doc.stat().st_mtime + 10
+    os.utime(doc, (new_mtime, new_mtime))
+    monkeypatch.setattr(
+        fresh, "ingest", lambda *a, **k: pytest.fail("must not re-embed")
+    )
+    r = server_module._ingest_files_root()
+    assert r.total_files == 0
+    assert fresh.source_mtime(str(doc)) == new_mtime

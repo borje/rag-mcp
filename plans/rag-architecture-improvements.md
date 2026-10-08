@@ -8,7 +8,7 @@ Source: recommendations from "Designing a Production-Grade RAG Architecture", co
 - Reciprocal Rank Fusion.
 - `BAAI/bge-small-en-v1.5` embeddings.
 - Offline/container-friendly operation.
-- Rich chunk metadata: `source_name`, `section_path`, `chunk_index`, `chunk_total`, `page_start`, `page_end`.
+- Rich chunk metadata: `source_name`, `section_path`, `chunk_index`, `chunk_total`.
 - Adjacent chunk expansion, default `RAG_MCP_ADJACENT_CHUNKS=1`, hard-capped by `n_results`.
 - mtime-based ingest skipping and stale-source cleanup.
 
@@ -44,8 +44,7 @@ Markdown already has splitting and overlap. Adjacent expansion now helps all for
 
 Weak spots:
 
-- PDF: one chunk per page with page metadata, but no section extraction or overlap.
-- DOCX: section chunks, but no long-section splitting.
+- PDF/DOCX: native chunkers removed in `7155f83`; such files now go through the optional `RAG_MCP_CONVERT_CMD` hook (convert to Markdown, then Markdown chunking).
 - TXT/RST: paragraph chunks only, no split/merge/overlap.
 
 Refactor `_split_long_section()` into a reusable splitter and apply it across formats.
@@ -68,7 +67,7 @@ Pipeline:
 
 Keep env-gated because CPU latency and dependency weight may not fit local/offline use.
 
-6. Improve BM25 preprocessing.
+6. Improve BM25 preprocessing. **Implemented 2026-10-08.**
 
 Current tokenization is `lower().split()`.
 
@@ -76,7 +75,7 @@ Use shared regex tokenization for ingest and query. Strip punctuation while pres
 
 Why: small, low-risk retrieval quality win.
 
-7. Use content-hash ingest detection.
+7. Use content-hash ingest detection. **Implemented 2026-10-08.**
 
 Current ingest change detection uses mtime only.
 
@@ -94,11 +93,10 @@ Move to Qdrant only when needing large corpora, concurrent writers, metadata ind
 
 1. Rich chunk metadata.
 
-Implemented fields: `source_name`, `section_path`, `chunk_index`, `chunk_total`, `page_start`, `page_end`.
+Implemented fields: `source_name`, `section_path`, `chunk_index`, `chunk_total`.
 
 Notes:
 
-- PDF chunks include `page_start` and `page_end`.
 - Markdown split chunks use per-section indices and totals.
 - Existing stores should be force reingested because backward compatibility was intentionally not added.
 
@@ -141,7 +139,7 @@ docker compose up --build
 
 1. Weighted RRF.
 2. Metadata-aware embedding text.
-3. Reusable splitter for PDF/DOCX/TXT/RST.
+3. Reusable splitter for TXT/RST.
 4. Better BM25 tokenizer.
 5. Content hash ingest detection.
 6. Optional reranker.

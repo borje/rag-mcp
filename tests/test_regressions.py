@@ -35,8 +35,6 @@ def _mk(source: str, n: int = 3, tag: str = "a") -> list[dict]:
             "section_path": "S",
             "chunk_index": i,
             "chunk_total": n,
-            "page_start": None,
-            "page_end": None,
             "title": f"T{i}",
             "body": f"{tag} body {i} with sufficient content to pass the minimum length filter",
         }
@@ -121,8 +119,6 @@ def test_missing_vectors_file_clears_stale_mtimes(tmp_path, monkeypatch):
                     "section_path": "S",
                     "chunk_index": 0,
                     "chunk_total": 1,
-                    "page_start": None,
-                    "page_end": None,
                     "title": "T",
                 }
             ]
@@ -180,8 +176,6 @@ def test_adjacent_expansion_does_not_cross_duplicate_section_titles(
                     "section_path": "Examples",
                     "chunk_index": i,
                     "chunk_total": 2,
-                    "page_start": None,
-                    "page_end": None,
                     "title": "Examples",
                     "body": f"{tag} section chunk {i} content padded {'pad ' * 15}",
                 }
@@ -358,8 +352,6 @@ def test_concurrent_scans_do_not_duplicate_same_file(tmp_path, monkeypatch):
                 "section_path": "T",
                 "chunk_index": 0,
                 "chunk_total": 1,
-                "page_start": None,
-                "page_end": None,
                 "title": "T",
                 "body": "content " * 30,
             }

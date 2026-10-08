@@ -29,7 +29,9 @@ def preview(text: str, length: int = 300) -> str:
     return collapsed[: length - 1].rstrip() + "…"
 
 
-def dashboard_data(store, files_root: Path, base_url: str) -> dict:
+def dashboard_data(
+    store, files_root: Path, base_url: str, last_scan: dict | None = None
+) -> dict:
     """Return dashboard data grouped by source with chunk previews only."""
     bodies = store.load_bodies()
     files: dict[str, dict] = {}
@@ -64,6 +66,8 @@ def dashboard_data(store, files_root: Path, base_url: str) -> dict:
         "files_root": str(files_root),
         "files": grouped,
         "scopes": store.list_scopes(),
+        "ignored_files": (last_scan or {}).get("ignored", 0),
+        "last_scan": last_scan,
     }
 
 
@@ -137,6 +141,8 @@ def dashboard_html(base_url: str) -> str:
       <div class="card"><div class="label">Chunks</div><div class="metric" id="chunks">-</div></div>
       <div class="card"><div class="label">Model</div><div class="muted" id="model">-</div></div>
       <div class="card"><div class="label">Files Root</div><div class="muted" id="filesRoot">-</div></div>
+      <div class="card"><div class="label">Ignored Files</div><div class="metric" id="ignored">-</div></div>
+      <div class="card"><div class="label">Last Scan</div><div class="muted" id="lastScan">-</div></div>
     </section>
     <div id="scopes" class="scopes"></div>
     <input id="filter" type="search" placeholder="Filter files, chunk titles, types, previews...">
@@ -149,7 +155,7 @@ def dashboard_html(base_url: str) -> str:
     function inScope(path, scope) {{
       return !scope || path === scope || path.startsWith(scope + '/');
     }}
-    const els = {{ sources: document.getElementById('sources'), chunks: document.getElementById('chunks'), model: document.getElementById('model'), filesRoot: document.getElementById('filesRoot'), files: document.getElementById('files'), filter: document.getElementById('filter'), scopes: document.getElementById('scopes') }};
+    const els = {{ sources: document.getElementById('sources'), chunks: document.getElementById('chunks'), model: document.getElementById('model'), filesRoot: document.getElementById('filesRoot'), ignored: document.getElementById('ignored'), lastScan: document.getElementById('lastScan'), files: document.getElementById('files'), filter: document.getElementById('filter'), scopes: document.getElementById('scopes') }};
 
     function text(value) {{ return value == null ? '' : String(value); }}
 
@@ -235,6 +241,9 @@ def dashboard_html(base_url: str) -> str:
       els.chunks.textContent = data.total_chunks;
       els.model.textContent = data.model;
       els.filesRoot.textContent = data.files_root;
+      els.ignored.textContent = data.ignored_files;
+      const s = data.last_scan;
+      els.lastScan.textContent = s ? `${{s.at}} (${{s.files}} ingested, ${{s.duration_s}}s)` : 'not yet';
       renderScopes();
       render();
     }}).catch(err => {{ els.files.textContent = `Failed to load dashboard data: ${{err}}`; }});

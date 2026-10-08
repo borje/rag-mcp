@@ -2,10 +2,13 @@
 """Hybrid RAG MCP server — offline, fastembed ONNX embeddings, no cloud."""
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -27,6 +30,7 @@ FILES_ROOT = Path(os.environ.get("FILES_ROOT", "/data"))
 WATCH_INTERVAL = int(os.environ.get("RAG_MCP_WATCH_INTERVAL", "30"))
 
 _ingest_lock = threading.Lock()
+_last_scan: dict | None = None
 
 
 def _file_url(source: str) -> str | None:
@@ -42,7 +46,7 @@ def _relative_source(path: Path) -> str:
 
 
 def dashboard_data() -> dict:
-    return dashboard.dashboard_data(store, FILES_ROOT, BASE_URL)
+    return dashboard.dashboard_data(store, FILES_ROOT, BASE_URL, _last_scan)
 
 
 def dashboard_chunk(chunk_id: str) -> dict | None:
@@ -72,6 +76,9 @@ class StoreStatus(BaseModel):
     total_sources: int
     model: str
     store_dir: str
+    last_scan: dict | None = None
+    watch_interval: int
+    supported_extensions: list[str]
 
 
 class FileIngestResult(BaseModel):
@@ -86,77 +93,134 @@ class IngestResult(BaseModel):
     skipped_files: list[str]
     failed_files: list[str] = []
     removed_sources: list[str]
+    ignored_files: list[str] = []
+
+
+def _fingerprint(path: Path) -> dict:
+    st = path.stat()
+    return {"mtime": st.st_mtime, "size": st.st_size}
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _ingest_files_root(log=None) -> IngestResult:
     """Ingest supported files under FILES_ROOT and remove stale sources."""
+    global _last_scan
     with _ingest_lock:
+        started = time.monotonic()
         FILES_ROOT.mkdir(parents=True, exist_ok=True)
         removed_sources = _cleanup_stale_sources()
         files: list[FileIngestResult] = []
         skipped: list[str] = []
         failed: list[str] = []
-        candidates = [
-            f
-            for f in sorted(FILES_ROOT.glob("**/*"))
-            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        ]
+        candidates: list[Path] = []
+        ignored: list[str] = []
+        for f in sorted(FILES_ROOT.glob("**/*")):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS:
+                candidates.append(f)
+            elif not any(p.startswith(".") for p in f.relative_to(FILES_ROOT).parts):
+                ignored.append(f.relative_to(FILES_ROOT).as_posix())
+        n_ignored = len(ignored)
+        if n_ignored > 200:
+            ignored = ignored[:200] + [f"... and {n_ignored - 200} more"]
         if log:
             log(f"found {len(candidates)} supported file(s)")
-        for i, f in enumerate(candidates, 1):
-            label = f.relative_to(FILES_ROOT)
-            try:
-                current_mtime = f.stat().st_mtime
-                if store.source_mtime(str(f)) == current_mtime:
-                    if log:
-                        log(f"[{i}/{len(candidates)}] unchanged {label}")
-                    continue
-                # Always remove existing chunks for this source first: an ingest
-                # interrupted before the mtime was recorded leaves orphan chunks
-                # that would otherwise be duplicated by the re-ingest.
-                stale = store.delete_source(str(f))
-                if stale and log:
-                    log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
-                if log:
-                    log(f"[{i}/{len(candidates)}] chunking {label}")
-                chunks = chunk_file(f)
-                if chunks:
-                    relative_source = _relative_source(f)
-                    for chunk in chunks:
-                        chunk["relative_source"] = relative_source
-                    if log:
-                        log(
-                            f"[{i}/{len(candidates)}] embedding {label} "
-                            f"({len(chunks)} chunks)"
-                        )
-                    n = store.ingest(
-                        chunks,
-                        mtime=current_mtime,
-                        log=(
-                            lambda message: log(
-                                f"[{i}/{len(candidates)}] {label}: {message}"
+        try:
+            for i, f in enumerate(candidates, 1):
+                label = f.relative_to(FILES_ROOT)
+                fp: dict | None = None
+                try:
+                    fp = _fingerprint(f)
+                    stored = store.source_fingerprint(str(f)) or {}
+                    if (stored.get("mtime"), stored.get("size")) == (
+                        fp["mtime"],
+                        fp["size"],
+                    ):
+                        if log:
+                            log(f"[{i}/{len(candidates)}] unchanged {label}")
+                        continue
+                    # ponytail: hash only when mtime/size changed; full-hash-every-scan if someone rewrites files with preserved stat
+                    fp["sha256"] = _sha256(f)
+                    if stored.get("sha256") == fp["sha256"]:
+                        store.touch_source(str(f), fp)
+                        if log:
+                            log(
+                                f"[{i}/{len(candidates)}] unchanged content, "
+                                f"mtime updated {label}"
                             )
-                        )
-                        if log
-                        else None,
-                    )
+                        continue
+                    # Always remove existing chunks for this source first: an ingest
+                    # interrupted before the fingerprint was recorded leaves orphan
+                    # chunks that would otherwise be duplicated by the re-ingest.
+                    stale = store.delete_source(str(f))
+                    if stale and log:
+                        log(f"[{i}/{len(candidates)}] {label}: removed {stale} old chunks")
                     if log:
-                        log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
-                    files.append(FileIngestResult(file=f.name, chunks=n))
-                else:
-                    if log:
-                        log(
-                            f"[{i}/{len(candidates)}] skipped {label} "
-                            f"(no chunks extracted)"
+                        log(f"[{i}/{len(candidates)}] chunking {label}")
+                    chunks = chunk_file(f)
+                    if chunks:
+                        relative_source = _relative_source(f)
+                        for chunk in chunks:
+                            chunk["relative_source"] = relative_source
+                        if log:
+                            log(
+                                f"[{i}/{len(candidates)}] embedding {label} "
+                                f"({len(chunks)} chunks)"
+                            )
+                        n = store.ingest(
+                            chunks,
+                            fingerprint=fp,
+                            rebuild_bm25=False,
+                            log=(
+                                lambda message: log(
+                                    f"[{i}/{len(candidates)}] {label}: {message}"
+                                )
+                            )
+                            if log
+                            else None,
                         )
-                    skipped.append(f.name)
-            except Exception as e:
-                # One bad file must not abort the scan for the remaining files.
-                print(f"[ingest] failed {label}: {e}", file=sys.stderr, flush=True)
-                if log:
-                    log(f"[{i}/{len(candidates)}] FAILED {label}: {e}")
-                failed.append(f.name)
+                        if log:
+                            log(f"[{i}/{len(candidates)}] ingested {label} ({n} chunks)")
+                        files.append(FileIngestResult(file=f.name, chunks=n))
+                    else:
+                        if log:
+                            log(
+                                f"[{i}/{len(candidates)}] skipped {label} "
+                                f"(no chunks extracted)"
+                            )
+                        skipped.append(f.name)
+                        store.touch_source(str(f), fp)
+                except Exception as e:
+                    # One bad file must not abort the scan for the remaining files.
+                    print(f"[ingest] failed {label}: {e}", file=sys.stderr, flush=True)
+                    if log:
+                        log(f"[{i}/{len(candidates)}] FAILED {label}: {e}")
+                    failed.append(f.name)
+                    # ponytail: fingerprint skipped/failed files too, so a broken
+                    # converter is not re-run every watch tick; reindex() forces a retry.
+                    if fp is not None and "sha256" in fp:
+                        store.touch_source(str(f), fp)
+        finally:
+            if files:
+                store.rebuild_bm25()
 
+        _last_scan = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "files": len(files),
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "removed": len(removed_sources),
+            "ignored": n_ignored,
+            "duration_s": round(time.monotonic() - started, 3),
+        }
         return IngestResult(
             total_chunks=sum(r.chunks for r in files),
             total_files=len(files),
@@ -164,16 +228,19 @@ def _ingest_files_root(log=None) -> IngestResult:
             skipped_files=skipped,
             failed_files=failed,
             removed_sources=removed_sources,
+            ignored_files=ignored,
         )
 
 
 def _cleanup_stale_sources() -> list[str]:
-    """Delete store entries whose source files no longer exist. Returns removed paths."""
-    removed = []
-    for s in store.list_sources():
-        if not Path(s).exists():
-            store.delete_source(s)
-            removed.append(s)
+    """Delete store entries whose files are gone or no longer supported. Returns removed paths."""
+    removed = [
+        s
+        for s in sorted(store.known_sources())
+        if not Path(s).exists() or Path(s).suffix.lower() not in SUPPORTED_EXTENSIONS
+    ]
+    if removed:
+        store.delete_sources(removed)
     return removed
 
 
@@ -183,6 +250,29 @@ def ingest() -> IngestResult:
 
     Remove files from FILES_ROOT, then run this tool to remove stale chunks.
     """
+    return _ingest_files_root()
+
+
+@mcp.tool()
+def reindex(path: str) -> IngestResult:
+    """Force re-chunking and re-embedding of one file (or every file under a
+    directory), given relative to FILES_ROOT or as an absolute path under it."""
+    # Lexical containment (no resolve): the scanner stores unresolved paths, and
+    # following symlinks here would target the wrong source.
+    root = Path(os.path.normpath(FILES_ROOT))
+    target = Path(os.path.normpath(FILES_ROOT / path))
+    if target == root or not target.is_relative_to(root):
+        raise ValueError(f"path must be inside FILES_ROOT (not the root itself): {path}")
+    if not target.exists():
+        raise FileNotFoundError(f"no such file under FILES_ROOT: {path}")
+    prefix = str(target)
+    # Clear fingerprints instead of deleting chunks: the scan then replaces each
+    # file's chunks in turn, so search never goes dark during a large reindex.
+    sources = {s for s in store.known_sources() if s == prefix or s.startswith(prefix + "/")}
+    if target.is_file():
+        sources.add(prefix)
+    for s in sorted(sources):
+        store.touch_source(s, {})
     return _ingest_files_root()
 
 
@@ -229,7 +319,12 @@ def list_scopes() -> str:
 @mcp.tool()
 def rag_status() -> StoreStatus:
     """Show store statistics: chunk count, source count, model, storage path."""
-    return StoreStatus(**store.stats())
+    return StoreStatus(
+        **store.stats(),
+        last_scan=_last_scan,
+        watch_interval=WATCH_INTERVAL,
+        supported_extensions=sorted(SUPPORTED_EXTENSIONS),
+    )
 
 
 if __name__ == "__main__":
@@ -310,6 +405,12 @@ if __name__ == "__main__":
         async def lifespan(app):
             try:
                 _startup_ingest()
+                if _last_scan and _last_scan["ignored"]:
+                    print(
+                        f"[startup] ignored {_last_scan['ignored']} unsupported "
+                        f"file(s) under {FILES_ROOT} (see ingest().ignored_files)",
+                        flush=True,
+                    )
             except KeyboardInterrupt:
                 print("[startup] interrupted", flush=True)
             if WATCH_INTERVAL > 0:

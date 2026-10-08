@@ -174,3 +174,92 @@ def test_markdown_split_chunks_have_section_indices(md_file: Path):
     assert {c["section_path"] for c in auth_chunks} == {"Authentication"}
 
 
+# ----- convert-to-markdown hook ------------------------------------------------
+
+import importlib
+
+import chunkers as _chunkers_module
+
+_CONVERT_VARS = ("RAG_MCP_CONVERT_CMD", "RAG_MCP_CONVERT_EXTS", "RAG_MCP_CONVERT_TIMEOUT")
+
+
+@pytest.fixture
+def reload_chunkers(monkeypatch):
+    def _reload(**env):
+        for name in _CONVERT_VARS:
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        return importlib.reload(_chunkers_module)
+
+    yield _reload
+    for name in _CONVERT_VARS:
+        monkeypatch.delenv(name, raising=False)
+    importlib.reload(_chunkers_module)
+
+
+def test_convert_off_by_default(reload_chunkers):
+    c = reload_chunkers()
+    assert ".pdf" not in c.SUPPORTED_EXTENSIONS
+    assert "RAG_MCP_CONVERT_CMD" not in c.current_chunk_config()
+
+
+def test_convert_cmd_registers_exts_and_chunks(reload_chunkers, tmp_path: Path):
+    body = "Converted body text " * 6  # >= 80 chars
+    c = reload_chunkers(
+        # %.0s consumes the path argument without printing it
+        RAG_MCP_CONVERT_CMD=f"printf '# Title\\n\\n{body}%.0s' {{input}}",
+        RAG_MCP_CONVERT_EXTS="pdf, .DOCX",
+    )
+    assert {".pdf", ".docx"} <= c.SUPPORTED_EXTENSIONS
+    assert c._CONVERT_EXTS == [".pdf", ".docx"]
+    assert "RAG_MCP_CONVERT_EXTS" not in c.current_chunk_config()
+    pdf = tmp_path / "my doc.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    chunks = c.chunk_file(pdf)
+    assert len(chunks) == 1
+    assert chunks[0]["source"] == str(pdf)
+    assert chunks[0]["chunk_type"] == "section"
+    assert chunks[0]["doc_title"] == "my doc"
+    assert chunks[0]["title"] == "Title"
+
+
+@pytest.mark.parametrize("template", ["cat {input}", 'cat "{input}"', "cat '{input}'"])
+def test_convert_hostile_filename_never_reaches_a_shell(
+    reload_chunkers, tmp_path: Path, template: str
+):
+    c = reload_chunkers(RAG_MCP_CONVERT_CMD=template)
+    pdf = tmp_path / "it's $(touch pwned) `id` doc.pdf"
+    pdf.write_text("# Heading\n\n" + "quoted path content " * 6)
+    chunks = c.chunk_file(pdf)
+    assert chunks and "quoted path content" in chunks[0]["body"]
+    assert not (Path.cwd() / "pwned").exists() and not (tmp_path / "pwned").exists()
+
+
+def test_convert_does_not_inherit_stdin(reload_chunkers, tmp_path: Path):
+    # A converter that reads stdin must see EOF, not the MCP stdio pipe.
+    c = reload_chunkers(RAG_MCP_CONVERT_CMD="cat", RAG_MCP_CONVERT_TIMEOUT="5")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"x")
+    assert c.chunk_file(pdf) == []
+
+
+def test_convert_failure_raises(reload_chunkers, tmp_path: Path):
+    # Shell features still work when the operator opts in explicitly.
+    c = reload_chunkers(RAG_MCP_CONVERT_CMD="sh -c 'echo boom >&2; exit 1' x {input}")
+    pdf = tmp_path / "bad.pdf"
+    pdf.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="convert failed for bad.pdf: boom"):
+        c.chunk_file(pdf)
+
+
+def test_convert_exts_do_not_override_openapi_sniffing(reload_chunkers):
+    c = reload_chunkers(
+        RAG_MCP_CONVERT_CMD="cat {input}", RAG_MCP_CONVERT_EXTS=".pdf,.json,.yaml"
+    )
+    assert c._EXT_MAP[".yaml"] is c.chunk_openapi
+    assert ".json" not in c._EXT_MAP
+
+
+def test_chunker_version_bumped():
+    assert _chunkers_module.CHUNKER_VERSION == 2

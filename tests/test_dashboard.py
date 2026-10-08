@@ -166,3 +166,23 @@ def test_server_dashboard_wrappers_delegate_to_dashboard_module(tmp_path, monkey
     assert server_module.dashboard_data()["files"][0]["path"] == "guide.md"
     assert server_module.dashboard_chunk("wrapped-chunk")["title"] == "Guide"
     assert "http://testserver/dashboard" in server_module.dashboard_html()
+
+
+def test_dashboard_data_has_ignored_files_and_last_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path / "store")
+    fresh = RAGStore()
+    last_scan = {"at": "2026-10-08T00:00:00+00:00", "files": 1, "ignored": 3}
+    payload = dashboard.dashboard_data(
+        fresh, tmp_path, "http://testserver", last_scan=last_scan
+    )
+    assert payload["ignored_files"] == 3
+    assert payload["last_scan"] == last_scan
+    empty = dashboard.dashboard_data(fresh, tmp_path, "http://testserver")
+    assert empty["ignored_files"] == 0
+    assert empty["last_scan"] is None
+
+
+def test_dashboard_html_has_ignored_and_last_scan_cards():
+    page = dashboard.dashboard_html("http://testserver")
+    assert 'id="ignored"' in page
+    assert 'id="lastScan"' in page

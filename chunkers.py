@@ -1,8 +1,10 @@
-"""Document chunkers: OpenAPI, Markdown, plain text."""
+"""Document chunkers: OpenAPI, Markdown, plain text, external converter."""
 
 import json
 import os
 import re
+import shlex
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Iterator
@@ -136,7 +138,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     return value
 
 
-CHUNKER_VERSION = 1
+CHUNKER_VERSION = 2
 
 _MD_MAX_CHARS = _env_int("MD_CHUNK_MAX_CHARS", 1000, minimum=1)
 _MD_OVERLAP_CHARS = _env_int("MD_CHUNK_OVERLAP_CHARS", 150, minimum=0)
@@ -207,7 +209,10 @@ def _split_md_sections(text: str) -> list[str]:
 
 
 def chunk_markdown(path: Path) -> Iterator[dict]:
-    text = path.read_text(encoding="utf-8")
+    yield from _chunk_markdown_text(path, path.read_text(encoding="utf-8"))
+
+
+def _chunk_markdown_text(path: Path, text: str) -> Iterator[dict]:
     for section in _split_md_sections(text):
         section = section.strip()
         if not section:
@@ -259,6 +264,40 @@ def chunk_text(path: Path) -> Iterator[dict]:
         }
 
 
+# ── External converter (PDF, DOCX, … → Markdown) ─────────────────────────────
+
+# Command template, split like a shell command line but run WITHOUT a shell
+# (no pipes/redirects; wrap those in a script). {input} is replaced with the
+# file path. Must print Markdown to stdout. Empty/unset disables the feature.
+_CONVERT_CMD = os.environ.get("RAG_MCP_CONVERT_CMD", "")
+_CONVERT_EXTS = [
+    e if e.startswith(".") else "." + e
+    for e in (
+        x.strip().lower()
+        for x in os.environ.get("RAG_MCP_CONVERT_EXTS", ".pdf,.docx").split(",")
+    )
+    if e
+]
+_CONVERT_TIMEOUT = _env_int("RAG_MCP_CONVERT_TIMEOUT", 120, minimum=1)
+
+
+def chunk_converted(path: Path) -> Iterator[dict]:
+    # argv form: a hostile file name under FILES_ROOT never reaches a shell parser.
+    argv = [a.replace("{input}", str(path)) for a in shlex.split(_CONVERT_CMD)]
+    proc = subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,  # never share the MCP stdio pipe
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_CONVERT_TIMEOUT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"convert failed for {path.name}: {proc.stderr[-500:]}")
+    return _chunk_markdown_text(path, proc.stdout)
+
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 _EXT_MAP = {
@@ -269,6 +308,10 @@ _EXT_MAP = {
     ".txt": chunk_text,
     ".rst": chunk_text,
 }
+if _CONVERT_CMD:
+    # .json/.yaml/.yml are content-sniffed in chunk_file; never hand them over.
+    _CONVERT_EXTS = [e for e in _CONVERT_EXTS if e not in (".json", ".yaml", ".yml")]
+    _EXT_MAP.update(dict.fromkeys(_CONVERT_EXTS, chunk_converted))
 
 # Single source of truth for the directory scanner in server.py.
 SUPPORTED_EXTENSIONS = frozenset(_EXT_MAP) | {".json"}
@@ -276,11 +319,13 @@ SUPPORTED_EXTENSIONS = frozenset(_EXT_MAP) | {".json"}
 _MIN_CHUNK_BODY = _env_int("MIN_CHUNK_BODY", 80, minimum=0)
 
 
-def current_chunk_config() -> dict[str, int]:
+def current_chunk_config() -> dict[str, int | str]:
     return {
         "MD_CHUNK_MAX_CHARS": _MD_MAX_CHARS,
         "MD_CHUNK_OVERLAP_CHARS": _MD_OVERLAP_CHARS,
         "MIN_CHUNK_BODY": _MIN_CHUNK_BODY,
+        # Converter settings are deliberately absent: changing them must not
+        # wipe Markdown/OpenAPI chunks. Use reindex(path) after a command change.
     }
 
 
