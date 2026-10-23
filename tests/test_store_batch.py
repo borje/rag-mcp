@@ -175,3 +175,20 @@ def test_delete_sources_can_defer_bm25_rebuild(rag_store, monkeypatch):
     assert results and all(r["source"] == "/data/docs/b.md" for r in results)
     rag_store.rebuild_bm25()
     assert calls == [1]
+
+
+def test_rebuild_and_delete_return_heap_to_os(rag_store, monkeypatch):
+    rag_store.ingest([_chunk("a.md", 0, "zebra " * 30)], rebuild_bm25=False)
+    calls = []
+    monkeypatch.setattr(RAGStore, "_malloc_trim", staticmethod(lambda: calls.append(1)))
+    rag_store.rebuild_bm25()
+    assert calls == [1]
+    rag_store.delete_sources(["/data/docs/a.md"])
+    assert calls == [1, 1]
+
+
+def test_load_returns_heap_to_os(rag_store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(RAGStore, "_malloc_trim", staticmethod(lambda: calls.append(1)))
+    RAGStore()
+    assert calls == [1]

@@ -243,6 +243,7 @@ class RAGStore:
             }
         self._validate_alignment()
         self._rebuild_bm25()
+        self._malloc_trim()
 
     def _validate_alignment(self) -> None:
         """Trim chunks/bodies/vectors to a consistent common length.
@@ -419,6 +420,7 @@ class RAGStore:
     def rebuild_bm25(self) -> None:
         with self._write_lock:
             self._rebuild_bm25()
+        self._malloc_trim()
 
     def delete_source(self, source: str, rebuild_bm25: bool = True) -> int:
         return self.delete_sources([source], rebuild_bm25=rebuild_bm25).get(source, 0)
@@ -455,6 +457,7 @@ class RAGStore:
                 # drop it (search falls back to vector-only) until rebuild_bm25().
                 self._bm25 = None
             self._reload_vectors_mmapped()
+        self._malloc_trim()
         return removed
 
     def list_sources(self) -> list[str]:
