@@ -1,6 +1,10 @@
 services:
   rag-mcp:
-    build: .
+    # ponytail: always fresh base + apt/pip upgrades on redeploy; drop no_cache if rebuild time hurts
+    build:
+      context: .
+      pull: true
+      no_cache: true
     restart: unless-stopped
     ports:
       - "${EXTERNAL_PORT:-8001}:8000"

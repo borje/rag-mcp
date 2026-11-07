@@ -2,9 +2,14 @@ FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 
+# Pick up Debian security fixes newer than the base image
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /app/
 
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# setuptools ships with the base image but isn't needed at runtime (CVE-2025-47273)
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+    && pip uninstall -y setuptools
 
 # Application source (always from project root, not the transfer snapshot)
 COPY server.py store.py chunkers.py dashboard.py reset-store.sh /app/
