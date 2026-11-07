@@ -10,6 +10,12 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY server.py store.py chunkers.py dashboard.py reset-store.sh /app/
 RUN chmod +x /app/reset-store.sh
 
+# ponytail: fixed uid 1000; match host uid via build arg if bind-mount perms clash
+RUN useradd --uid 1000 --create-home app \
+    && mkdir -p /data /store /models \
+    && chown app:app /data /store /models
+USER app
+
 VOLUME /data
 VOLUME /models
 
